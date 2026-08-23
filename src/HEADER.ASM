@@ -100,7 +100,18 @@ PAGE 60, 132
    .8086
 
 ; This is the size of the new stack we create for the C code...
-STACKSIZE   EQU   256   ; use whatever seems appropriate...
+; Bumped from sdpp-main's original 256 to 1024 -- confirmed on real
+; hardware 2026-08-23: a device-driver-request-triggered disk_read()
+; (via STRATEGY/INTERRUPT, not the driver-load-time Initialize() path)
+; crashed with exception 06 (invalid opcode -- consistent with a
+; corrupted return address) partway through sd_read_block()'s call
+; chain (sd_read_block -> sd_cmd -> spi_xfer -> dispatch_send_spi_op ->
+; raw_send_byte/raw_recv_byte). sdpp-main's original SDMM.C backend was
+; shallow (bit-banged SPI inline) so 256 bytes was plenty for it; this
+; backend's wire/dispatch/SPI/SD-command layering is 5-6 frames deep
+; per call. Segment has ~55KB of headroom (see TRINKET.MAP) -- no
+; reason to be stingy.
+STACKSIZE   EQU   1024   ; use whatever seems appropriate...
 
 
 ;   This DGROUP, and the order the segments appear in this module, will
