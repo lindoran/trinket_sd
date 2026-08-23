@@ -1,0 +1,7 @@
+/bin/
+
+/legacy/bc31/*
+!/legacy/bc31/.gitkeep
+
+/legacy/BC31/*
+!/legacy/BC31/.gitkeep
