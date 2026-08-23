@@ -107,8 +107,8 @@ toolchain used by `sdpp-main`. These proprietary tools are not included; if you
 have a licensed copy, place them in `./legacy/bc31`.
 
 You will also need dosemu2 to run the buildchain in linux with the defualt `Makefile`.
-will asume that dosemu2 brings up your c drive as `~/.dosemu/drive_c` and copy the build
-directory there so that the defualt `./src/MAKEFILE` (borland) does not break.
+This will asume that dosemu2 brings up your c drive as `~/.dosemu/drive_c` and copy 
+the build directory there so that the defualt `./src/MAKEFILE` (borland) does not break.
 
 please see https://github.com/dosemu2/dosemu2/issues/1145 for dosemu2 setup.
 
