@@ -99,19 +99,18 @@ PAGE 60, 132
 
    .8086
 
-; This is the size of the new stack we create for the C code...
-; Bumped from sdpp-main's original 256 to 1024 -- confirmed on real
-; hardware 2026-08-23: a device-driver-request-triggered disk_read()
-; (via STRATEGY/INTERRUPT, not the driver-load-time Initialize() path)
-; crashed with exception 06 (invalid opcode -- consistent with a
-; corrupted return address) partway through sd_read_block()'s call
-; chain (sd_read_block -> sd_cmd -> spi_xfer -> dispatch_send_spi_op ->
-; raw_send_byte/raw_recv_byte). sdpp-main's original SDMM.C backend was
-; shallow (bit-banged SPI inline) so 256 bytes was plenty for it; this
-; backend's wire/dispatch/SPI/SD-command layering is 5-6 frames deep
-; per call. Segment has ~55KB of headroom (see TRINKET.MAP) -- no
-; reason to be stingy.
-STACKSIZE   EQU   256   ; use whatever seems appropriate...
+; This is the size of the new stack we create for the C code.
+; Keep this at sdpp-main's original 256 bytes.  An experimental increase
+; to 1024 bytes was rolled back; the current TRINKET.C implementation
+; keeps transfer buffers in static storage, uses 16-bit loop counters where
+; practical, and avoids 32-bit shift helpers that can add unsafe runtime
+; calls to the small-model driver.
+;
+; The request path is deeper than sdpp-main's original bit-banged SDMM.C
+; backend because it now passes through the wire, dispatch, SPI, and SD
+; command layers.  Any future stack-size change must therefore be validated
+; in the real STRATEGY/INTERRUPT request path, not only during initialization.
+STACKSIZE   EQU   256   ; sdpp-main-compatible C stack size
 
 
 ;   This DGROUP, and the order the segments appear in this module, will
