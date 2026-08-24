@@ -10,6 +10,9 @@ whole driver, three source files plus the two skeleton files DOS itself
 requires.
 
 ## Where each piece came from
+The original Borland C++ repo for PPSD at: https://github.com/nilseuropa/sdpp. For this build we simply stuck to 
+a functional workflow and replaced the wire backend to handle the link requests though the new paralell read/write
+trinket calls.  This saves a huge amount of time bit-banging SPI through the port.
 
 | File | Origin | Changed? |
 |---|---|---|
@@ -99,6 +102,10 @@ above):
 /b = port base index: 1=0x3BC, 2=0x378, 3=0x278, 4=0x3E8, 5=0x2E8
      Default: 0x378
 ```
+## Prebuilt Driver
+The toolchain to build the driver is specific and antiqated.  Prebuilt binary can
+be found in the `dist` directory.
+
 
 ## Build
 
@@ -131,26 +138,69 @@ PATH C:\;C:\BC31\BIN;%PATH%
 
 `BUILD.BAT` will also try to set these if you just run it from wherever you've set it.
 
-## Suggested bring-up order
+## Functional Mockup:
+### Key Discovery in SDMM.C vs TRINKET.C
 
-Same diagnostic logic `trinket_ifacetest`'s own docs use throughout --
-isolate "wire problem" from "dispatch/SPI problem" from "SD-command
-problem" from "resident-driver problem", in that order:
+  Comparing sdpp's SDMM.C against TRINKET.C revealed why the crash at 039F:192C / 039F:193C was occurring:
 
-1. **`ifacetest.c` against this same port base**, if not already
-   re-confirmed recently -- proves the wire/dispatch layer alone, no
-   SPI or SD involved.
-2. **`sdtest.c`** (already built, per project history) against the
-   actual card and cabling this driver will use -- proves SD command
-   sequencing + FAT16 layout on this specific hardware, still with no
-   driver/TSR/reboot in the loop.
-3. **This driver, `/d` debug mode, on real DOS**, `DEVICE=TRINKET.SYS
-   /d /p=1 /b=2` (adjust to your port). Debug output on load should
-   show the banner, the same `SD: rh = ...` and BPB dump `sdpp-main`
-   always printed, and (from `TRINKET.C`) a `TRINKET: card ready (...)`
-   line from `sd_init()`. A failure here that didn't happen in (1) or
-   (2) points at this file's specific integration -- start by checking
-   whether the failure is on the very first sector read (`disk_initialize`
-   calling `sd_init`/reading the boot sector) or later (multi-sector
-   reads, or writes specifically), since those exercise different code
-   paths in `TRINKET.C`.
+  1. SDMM.C explicitly defined #define NOSHIFT:
+  In Borland C 3.1 16-bit small model (-ms), performing 32-bit shifts or 32-bit multiplications on DWORD values (such as arg >> 24 or
+  lba * 512ul) forces the compiler to link external runtime assembly helper routines from cs.lib (LXURSH@ / H_LURSH and LXLSH@ /
+  H_LLSH).
+  2. The Stack Mismatch:
+  Because TRINKET.C performed 32-bit shifts in sd_cmd (arg >> 24, arg >> 16, arg >> 8) and sd_arg_for_lba (lba * 512ul), tlink pulled
+  H_LURSH (LXURSH@) into the binary right at the end of the _TEXT segment (offset 192C / 193C).
+  When sd_cmd called LXURSH@ via a near call, LXURSH@ executed its far return (RETF), corrupting the return stack frame and causing
+  execution to fall off the end of _TEXT into _DATA (hitting Exception 06 #UD at 039F:0000193C).
+  3. Stack Frame Depth:
+  TRINKET.C's spi_byte -> spi_xfer -> spi_get_result stack allocation chain created deep stack frames on every single byte transfer on
+  HEADER.ASM's 256-byte stack.
+
+  ### Changes Made to TRINKET.C
+
+  1. Adopted SDMM.C's #define NOSHIFT byte-indexing in sd_cmd:
+  Replaced 32-bit right shifts with direct Little-Endian byte pointer access:
+    frame[1] = ((BYTE *)&arg)[3];
+    frame[2] = ((BYTE *)&arg)[2];
+    frame[3] = ((BYTE *)&arg)[1];
+    frame[4] = ((BYTE *)&arg)[0];
+    
+  2. Shift-Free LBA Address Calculation in sd_arg_for_lba:
+  Replaced 32-bit multiplication lba * 512ul with 16-bit WORD shifts:
+    static DWORD sd_arg_for_lba(DWORD lba)
+    {
+       DWORD res;
+       WORD lo, hi;
+       if (g_block_addressed) return lba;
+       lo = ((WORD *)&lba)[0];
+       hi = ((WORD *)&lba)[1];
+       ((WORD *)&res)[0] = (lo << 9);
+       ((WORD *)&res)[1] = (lo >> 7) | (hi << 9);
+       return res;
+    }
+
+  3. Preserved Stack Memory:
+      • Changed local temporary arrays/buffers in spi_byte, spi_xfer, spi_op_cs, spi_op_config, and spi_get_result to static storage
+      class to prevent stack allocation churn on the 256-byte stack.
+      • Changed wait_error_high and wait_error_low loop indices from 32-bit DWORD to 16-bit UINT.
+
+
+  ### Verification
+
+  • H_LURSH (LXURSH@) and H_LLSH (LXLSH@) are completely gone from bin/trinket.map.
+  • Recompiled clean with make (0 errors, 0 warnings).
+  • src/HEADER.ASM, src/DRIVER.C, src/CPRINT.C, and src/SD.C remain 100% original / unchanged.
+
+  Additionally, the driver loads, maps to D: and then provides accsess to the sd card.
+
+## TODO:
+
+1) investigate *Multi-block read/write** (`CMD18`/`CMD25`). `sdtest.c` never had
+  it either -- `disk_read()`/`disk_write()` here just loop the
+  single-block `CMD17`/`CMD24` commands sector by sector. Correct, not
+  fast: per `sdtest.c`'s own header comment, every SPI byte costs two
+  full dispatch round trips over the parallel link, so large transfers
+  will be slow until/unless that's revisited.  -- this is likely one of the reasons
+  bringing up the total volume size in DIR takes so long
+
+2) verify the work done by Gemini Flash (check for bugs, coding / comment errors etc)
