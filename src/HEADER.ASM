@@ -111,7 +111,7 @@ PAGE 60, 132
 ; backend's wire/dispatch/SPI/SD-command layering is 5-6 frames deep
 ; per call. Segment has ~55KB of headroom (see TRINKET.MAP) -- no
 ; reason to be stingy.
-STACKSIZE   EQU   1024   ; use whatever seems appropriate...
+STACKSIZE   EQU   256   ; use whatever seems appropriate...
 
 
 ;   This DGROUP, and the order the segments appear in this module, will
