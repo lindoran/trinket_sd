@@ -107,7 +107,7 @@ static WORD base_port = 0x378u;
 #define REG_STATUS   1
 #define REG_CONTROL  2
 
-#define POLL_TIMEOUT_ITERS  60000UL
+#define POLL_TIMEOUT_ITERS  60000u
 
 static BYTE ctrl_shadow = CTRL_IDLE_DEFAULT;
 
@@ -136,7 +136,7 @@ static void reset_hold_delay(void)
 
 static int wait_error_high(void)
 {
-   DWORD i;
+   UINT i;
    for (i = 0; i < POLL_TIMEOUT_ITERS; i++)
       if (inportbyte(base_port + REG_STATUS) & 0x08u) return 0;
    return 1;
@@ -144,7 +144,7 @@ static int wait_error_high(void)
 
 static int wait_error_low(void)
 {
-   DWORD i;
+   UINT i;
    for (i = 0; i < POLL_TIMEOUT_ITERS; i++)
       if (!(inportbyte(base_port + REG_STATUS) & 0x08u)) return 0;
    return 1;
@@ -257,8 +257,8 @@ static int dispatch_send_spi_op(BYTE opcode,
 static int spi_get_result(BYTE *out_status, BYTE DOSFAR *buf,
    UINT bufcap, UINT *out_len)
 {
-   BYTE status, len_lo, len_hi, b;
-   UINT len, i;
+   static BYTE status, len_lo, len_hi, b;
+   static UINT len, i;
 
    host_select_direction(1);
    if (raw_send_byte(DISPATCH_CMD_SPI)) return 1;
@@ -281,16 +281,16 @@ static int spi_get_result(BYTE *out_status, BYTE DOSFAR *buf,
 
 static int spi_op_config(BYTE mode, WORD khz)
 {
-   BYTE payload[3];
+   static BYTE payload[3];
    payload[0] = mode;
    payload[1] = (BYTE)(khz & 0xFFu);
-   payload[2] = (BYTE)((khz >> 8) & 0xFFu);
+   payload[2] = (BYTE)(khz >> 8);
    return dispatch_send_spi_op(SPI_OP_CONFIG, payload, 3, 0, 0);
 }
 
 static int spi_op_cs(int assert_level)
 {
-   BYTE payload[1];
+   static BYTE payload[1];
    payload[0] = (BYTE)(assert_level ? 1 : 0);
    return dispatch_send_spi_op(SPI_OP_CS, payload, 1, 0, 0);
 }
@@ -303,9 +303,9 @@ static int spi_op_cs(int assert_level)
 static int spi_xfer(const BYTE DOSFAR *tx, UINT len,
    BYTE DOSFAR *rx, UINT rxcap, UINT *rx_len)
 {
-   BYTE hdr[2];
-   BYTE status;
-   UINT got_len;
+   static BYTE hdr[2];
+   static BYTE status;
+   static UINT got_len;
 
    if (len > SPI_MAX_XFER) return 1;
 
@@ -325,8 +325,8 @@ static int spi_xfer(const BYTE DOSFAR *tx, UINT len,
  * way (matches sdtest.c's spi_byte() convention). */
 static BYTE spi_byte(BYTE tx_byte)
 {
-   BYTE tx[1], rx[1];
-   UINT rx_len;
+   static BYTE tx[1], rx[1];
+   static UINT rx_len;
 
    tx[0] = tx_byte;
    if (spi_xfer(tx, 1, rx, 1, &rx_len) != 0 || rx_len != 1) return 0xFFu;
@@ -350,10 +350,10 @@ static BYTE sd_cmd(BYTE cmd, DWORD arg)
    int i;
 
    frame[0] = (BYTE)(0x40u | cmd);
-   frame[1] = (BYTE)(arg >> 24);
-   frame[2] = (BYTE)(arg >> 16);
-   frame[3] = (BYTE)(arg >> 8);
-   frame[4] = (BYTE)(arg);
+   frame[1] = ((BYTE *)&arg)[3];
+   frame[2] = ((BYTE *)&arg)[2];
+   frame[3] = ((BYTE *)&arg)[1];
+   frame[4] = ((BYTE *)&arg)[0];
    if (cmd == 0)       frame[5] = 0x95u;
    else if (cmd == 8)  frame[5] = 0x87u;
    else                frame[5] = 0x01u;
@@ -482,7 +482,14 @@ static int sd_init(void)
 
 static DWORD sd_arg_for_lba(DWORD lba)
 {
-   return g_block_addressed ? lba : (lba * 512ul);
+   DWORD res;
+   WORD lo, hi;
+   if (g_block_addressed) return lba;
+   lo = ((WORD *)&lba)[0];
+   hi = ((WORD *)&lba)[1];
+   ((WORD *)&res)[0] = (lo << 9);
+   ((WORD *)&res)[1] = (lo >> 7) | (hi << 9);
+   return res;
 }
 
 /* CMD17 READ_SINGLE_BLOCK straight into the caller's far buffer -- no
