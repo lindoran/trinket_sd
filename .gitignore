@@ -5,3 +5,13 @@
 
 /legacy/BC31/*
 !/legacy/BC31/.gitkeep
+
+/firmware/build/
+
+# Firmware build products, wherever a build directory is configured.
+*.elf
+*.elf.map
+*.uf2
+*.bin
+*.hex
+*.dis
