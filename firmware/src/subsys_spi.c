@@ -85,6 +85,15 @@ static uint8_t rx_buf[SPI_MAX_XFER];
 static uint16_t rx_len;          // valid bytes in rx_buf from the last completed SPI_OP_XFER
 static uint8_t last_status;      // SPI_STATUS_OK / SPI_STATUS_ERROR, reported on the next Read
 
+// See subsys_spi.h's header comment on subsys_spi_set_debug(). Off by
+// default -- gates only the routine/no-error printf()s below, never
+// the error-path ones.
+static bool debug_enabled = false;
+
+void subsys_spi_set_debug(bool enabled) {
+    debug_enabled = enabled;
+}
+
 // A single shared scratch buffer for the TX bytes an SPI_OP_XFER reads
 // off the wire before handing them to spi_write_read_blocking(). Static
 // (not a run()-local array) purely to keep this off the tiny driver-
@@ -128,6 +137,13 @@ void subsys_spi_reset(void) {
     cs_deassert();
     spi_set_baudrate(SPI_PORT, SPI_DEFAULT_BAUD_HZ);
     apply_mode(SPI_DEFAULT_MODE);
+
+    // debug_enabled is deliberately NOT touched here: it's an
+    // operator's console setting for the current bring-up/timing
+    // session (main.c's ESC toggle), not link/SD-transaction state --
+    // resetting it on every nAuto-LF pulse (which TRINKET.C's
+    // disk_initialize() triggers on every driver load) would silently
+    // undo the operator's choice each time DOS reinitializes.
 
     rx_len = 0;
     last_status = SPI_STATUS_ERROR;
@@ -227,7 +243,9 @@ static bool handle_op_config(void) {
     spi_set_baudrate(SPI_PORT, hz);
     apply_mode(mode & 0x03u);
 
-    printf("SPI: config mode=%u requested=%luHz\n", (unsigned)(mode & 0x03u), (unsigned long)hz);
+    if (debug_enabled) {
+        printf("SPI: config mode=%u requested=%luHz\n", (unsigned)(mode & 0x03u), (unsigned long)hz);
+    }
     return true;
 }
 
@@ -238,10 +256,10 @@ static bool handle_op_cs(void) {
 
     if (level) {
         cs_assert();
-        printf("SPI: CS asserted\n");
+        if (debug_enabled) printf("SPI: CS asserted\n");
     } else {
         cs_deassert();
-        printf("SPI: CS deasserted\n");
+        if (debug_enabled) printf("SPI: CS deasserted\n");
     }
     return true;
 }
@@ -293,7 +311,7 @@ static bool handle_op_xfer(void) {
 
     rx_len = len;
     last_status = SPI_STATUS_OK;
-    printf("SPI: XFER len=%u ok\n", (unsigned)len);
+    if (debug_enabled) printf("SPI: XFER len=%u ok\n", (unsigned)len);
     return true;
 }
 
@@ -348,7 +366,9 @@ static bool run_read_side(void) {
         }
     }
 
-    printf("SPI: read result status=%u len=%u\n", (unsigned)last_status, (unsigned)rx_len);
+    if (debug_enabled) {
+        printf("SPI: read result status=%u len=%u\n", (unsigned)last_status, (unsigned)rx_len);
+    }
     return true;
 }
 

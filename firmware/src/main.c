@@ -82,11 +82,35 @@
 
 #include <stdio.h>
 #include "pico/stdlib.h"
+#include "pico/stdio.h"
 
 #include "wire.h"
 #include "dispatch.h"
 #include "subsys_testharness.h"
 #include "subsys_spi.h"
+
+#define KEY_ESC  0x1Bu
+
+// Non-blocking check for an ESC keypress on the USB CDC console,
+// toggling subsys_spi.c's routine debug printf()s (see
+// subsys_spi_set_debug()'s header comment). Deliberately polled only
+// here, once per main-loop iteration between dispatch cycles -- NOT
+// from inside wire.c's wire_wait_init_high()/wait loops, which are
+// the timing-critical path every byte handshake goes through and
+// stay exactly as confirmed-on-hardware. Practical effect: this only
+// takes the keypress between top-level dispatch cycles, so toggle it
+// at the DOS prompt before/after the operation you're timing, not
+// expecting it to interrupt one already in flight.
+static void poll_debug_toggle(void) {
+    static bool spi_debug = false;   // mirrors what subsys_spi.c was last told
+
+    int c = getchar_timeout_us(0);
+    if (c == KEY_ESC) {
+        spi_debug = !spi_debug;
+        subsys_spi_set_debug(spi_debug);
+        printf("trinket firmware: SPI debug logging %s\n", spi_debug ? "ON" : "OFF");
+    }
+}
 
 int main(void) {
     stdio_init_all();
@@ -98,6 +122,7 @@ int main(void) {
     // so early messages aren't lost while a terminal is still attaching.
     sleep_ms(1500);
     printf("trinket firmware: ready (dispatcher, 2 subsystems: test harness, SPI)\n");
+    printf("trinket firmware: SPI debug logging OFF by default -- press ESC on this console to toggle\n");
 
     while (true) {
         // Checked first, every iteration: covers reset asserted between
@@ -112,6 +137,8 @@ int main(void) {
             subsys_spi_reset();
             continue;
         }
+
+        poll_debug_toggle();
 
         if (!dispatch_run_one()) {
             continue;   // wire_reset_pending() fired; handled at top of loop
