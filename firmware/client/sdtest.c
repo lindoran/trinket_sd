@@ -77,6 +77,15 @@
  *                             pattern to one physical sector. Requires
  *                             the literal "-y" to do anything -- see
  *                             this command's own comment below for why.
+ *     bench [count] [lba]     init, then replay <count> (default 57,
+ *                             decimal -- matches dir_log.txt's DIR
+ *                             trace) single-block reads at <lba>
+ *                             (default 0, hex) back-to-back, timed via
+ *                             the BIOS tick counter, data discarded.
+ *                             Isolates the SD-command layer's wire
+ *                             cost from DOS's own FAT-walk and the
+ *                             resident driver's dispatch path -- see
+ *                             this command's own comment below.
  *
  * Exit codes: 0 success, 1 SD/SPI-layer failure (card didn't respond,
  * bad token, timeout -- see stderr message for which), 2 FAT16-layer
@@ -944,8 +953,81 @@ static int cmd_writesector(unsigned long lba, int confirmed) {
 }
 
 /* ===================================================================
- * Section 6: argument parsing + main.
+ * Section 5b: benchmark -- replay N single-block reads, time only.
+ *
+ * Purpose: isolate the wire-protocol round-trip cost dir_log.txt's
+ * analysis pointed at, from everything a real DOS DIR also drags in
+ * (DOS kernel FAT-walk decisions, TRINKET.SYS's own dispatch path,
+ * any console I/O). This calls the exact same sd_read_block() as
+ * `readsector` above and everything else in this file -- same
+ * CS/CMD17/token-poll/512-byte-xfer/CRC-discard sequence a DIR's FAT
+ * scan drives, just replayed count times back-to-back against a
+ * single fixed LBA (address doesn't matter -- CMD17's handshake cost
+ * is identical regardless of which sector it names) with the 512
+ * bytes each read returns thrown away immediately rather than printed
+ * or parsed. Not a substitute for timing a real DIR end-to-end: this
+ * measures the SD-command layer's wire cost alone, not the resident
+ * driver's own dispatch path or DOS's FAT-walk logic on top of it --
+ * useful for isolating whether a firmware-side change (the ESC debug
+ * toggle, a future CRC-skip, etc.) moved that specific number, not
+ * for reproducing DOS's exact reported DIR time.
+ *
+ * Timing: BIOS INT 1Ah AH=00h (read system clock counter), which
+ * ticks at ~18.2065 Hz (~54.9ms/tick) -- coarse next to a single
+ * block's cost, fine at N=57+ blocks where the total run is several
+ * seconds. AL on return is DOS's midnight-rollover flag; a nonzero
+ * value from the closing read means midnight passed mid-run and the
+ * elapsed figure below is wrong -- flagged rather than silently
+ * trusted, since this runs standalone with no reason to assume a
+ * time-of-day scheduler around it.
  * =================================================================== */
+
+static unsigned long bios_ticks(unsigned char *midnight_flag) {
+    unsigned short ax = 0x0000u;   /* AH=0x00 (read clock) in, AL=midnight flag out */
+    unsigned short cx, dx;
+    __asm__ volatile (
+        "int $0x1a"
+        : "+a"(ax), "=c"(cx), "=d"(dx)
+        :
+        : "cc"
+    );
+    if (midnight_flag) *midnight_flag = (unsigned char)(ax & 0xFFu);
+    return ((unsigned long)cx << 16) | dx;
+}
+
+static int cmd_bench(unsigned long lba, unsigned count) {
+    unsigned char buf[512];
+    unsigned long t0, t1, elapsed_ticks, elapsed_ms;
+    unsigned char midnight;
+    unsigned i;
+
+    if (sd_init() != 0) return 1;
+
+    printf("sdtest: bench: %u single-block reads at lba=%lu (data discarded)\n", count, lba);
+
+    t0 = bios_ticks(NULL);
+    for (i = 0; i < count; i++) {
+        if (sd_read_block(lba, buf) != 0) {
+            fprintf(stderr, "sdtest: bench: read #%u failed, aborting\n", i);
+            return 1;
+        }
+        /* buf intentionally untouched beyond this -- next iteration
+         * overwrites it, nothing here reads or prints it. */
+    }
+    t1 = bios_ticks(&midnight);
+
+    elapsed_ticks = t1 - t0;   /* wraps naturally if t1 < t0 within a day */
+    elapsed_ms = (elapsed_ticks * 54925ul) / 1000ul;
+
+    printf("sdtest: bench: %lu ticks (~%lu ms) for %u blocks, ~%lu ms/block\n",
+           elapsed_ticks, elapsed_ms, count,
+           count ? (elapsed_ms / count) : 0ul);
+    if (midnight) {
+        fprintf(stderr, "sdtest: bench: WARNING -- midnight rollover during run, timing above is unreliable\n");
+    }
+
+    return 0;
+}
 
 static unsigned long parse_hex_ul(const char *s) {
     unsigned long v = 0;
@@ -978,7 +1060,7 @@ int main(int argc, char **argv) {
 
     if (cmd == NULL) {
         fprintf(stderr,
-            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y> [/P=xxxx] [-v]\n");
+            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
         return 3;
     }
 
@@ -997,9 +1079,16 @@ int main(int argc, char **argv) {
     } else if (strcmp(cmd, "writesector") == 0 && nargs >= 1) {
         int confirmed = (nargs >= 2 && strcmp(args[1], "-y") == 0);
         rc = cmd_writesector(parse_hex_ul(args[0]), confirmed);
+    } else if (strcmp(cmd, "bench") == 0) {
+        /* Both optional: COUNT (decimal, default 57 -- matches the
+         * block count dir_log.txt's DIR trace showed) and LBA (hex,
+         * default 0 -- any valid sector, content is never read). */
+        unsigned long count = (nargs >= 1) ? strtoul(args[0], NULL, 10) : 57ul;
+        unsigned long lba   = (nargs >= 2) ? parse_hex_ul(args[1]) : 0ul;
+        rc = cmd_bench(lba, (unsigned)count);
     } else {
         fprintf(stderr,
-            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y> [/P=xxxx] [-v]\n");
+            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
         rc = 3;
     }
 
