@@ -92,6 +92,37 @@ void fmemset (void far *dst, BYTE c, WORD n)
 }
 
 
+/* bios_ticks */
+/*   Reads the BIOS system clock counter (INT 1Ah AH=00h), which ticks */
+/* at ~18.2065 Hz (~54.9ms/tick).  Debug-only diagnostic use (see       */
+/* ReadBlock()'s comment below) -- coarse next to a single sector's     */
+/* real cost, fine for a running total accumulated across many calls.   */
+/* Same midnight-rollover caveat as sdtest.c's bench command's own      */
+/* bios_ticks(): if the accumulation window crosses midnight the        */
+/* running totals below go bogus.  Not guarded against here -- meant    */
+/* for a short, deliberate diagnostic session, not permanent operation. */
+unsigned long bios_ticks (void)
+{
+  unsigned hi, lo;
+  _asm {
+   mov   ah,0
+   int   1Ah
+   mov   hi,cx
+   mov   lo,dx
+  }
+  return (((unsigned long) hi) << 16) | lo;
+}
+
+/* Debug-only running totals for ReadBlock()'s own timing breakdown --   */
+/* see ReadBlock()'s comment. Reset only where InitNeeded/Stat are (i.e. */
+/* effectively never, once the driver has successfully initialized --   */
+/* if you want a clean set of numbers for one specific DIR/command,      */
+/* reboot or reload the driver first so these start at 0).              */
+static DWORD rb_ticks_total = 0;
+static DWORD rb_ticks_io    = 0;
+static WORD  rb_call_count  = 0;
+
+
 /* Media Check */
 /*   DOS calls this function to determine if the tape in the drive has  */
 /* been changed.  The SD hardware can't determine this (like many  */
@@ -179,18 +210,57 @@ BOOLEAN drive_init (rh_t far *rh)
 
 
 /* Read Data */
+/*   Debug-only timing breakdown (see bios_ticks()/rb_ticks_* above):    */
+/* dir_log.txt's wire-protocol analysis and the sdtest.c bench command   */
+/* it led to both measured the SD-command layer alone as fast (~1.3s     */
+/* for 57 single-block reads) -- far short of a real DIR's observed      */
+/* wall-clock time on a 500MB volume. TRINKET.C/SD.C/HEADER.ASM were all */
+/* read closely and (as of this comment) compiled clean with a real      */
+/* Borland C++ 3.1 pass with nothing structurally slow found -- no       */
+/* redundant re-init, no loops in the STRATEGY/INTERRUPT path.  This     */
+/* accumulates, across every ReadBlock() call since the driver last      */
+/* (re)initialized, how many BIOS ticks (~54.9ms each) are spent inside  */
+/* this whole function (rb_ticks_total) versus inside the SDRead() call  */
+/* specifically (rb_ticks_io) -- the same call chain bench measures      */
+/* directly, off the wire, with nothing else around it.                  */
+/*                                                                        */
+/* To use: put /D on this driver's CONFIG.SYS line (this is DRIVER.C's   */
+/* own Debug flag, parsed by parse_options() below -- NOT the trinket    */
+/* firmware's separate ESC-key USB-CDC toggle from the earlier patch,    */
+/* different flag on a different processor), reboot so the accumulators  */
+/* start at 0, then run the slow DIR once. Read the LAST "SD: RB timing" */
+/* line printed: if cum_io there is close to what bench measured for the */
+/* same block count, the missing time is NOT inside SDRead()/disk_read/  */
+/* sd_read_block (already shown fast) or in this function's own          */
+/* bookkeeping -- it's being spent somewhere between ReadBlock() calls   */
+/* that this driver's code never sees at all (DOS's own per-request      */
+/* overhead). If cum_total is instead close to the real DIR's wall-clock */
+/* time, the gap IS inside this function or drive_init() after all, and  */
+/* cum_total vs cum_io will point at which half.  Printing happens after */
+/* each call's timing window closes, so the cdprintf() calls themselves  */
+/* (console I/O, not necessarily fast) don't get counted into the        */
+/* figures -- expect the Debug-enabled run's own wall-clock time to run  */
+/* even longer than a normal slow DIR because of that console output;    */
+/* the cumulative ticks in the last printed line are the numbers that    */
+/* matter, not this particular run's stopwatch time.                     */
 PUBLIC void ReadBlock (rh_io_t far *rh)
 {
   WORD lbn, count;  int status;  BYTE far *dta;
   WORD sendct;
+  unsigned long t_start, t_io0, t_io1, t_end;   /* Debug-only, see above */
+
   if (Debug)
     cdprintf("SD: read block: unit=%d, start=%d, count=%d, dta=%4x:%4x\n",
       rh->rh.unit, rh->start, rh->count, FP_SEG(rh->dta), FP_OFF(rh->dta));
+  if (Debug) t_start = bios_ticks();
+
   if (!drive_init ((rh_t far *) rh))  return;
   count = rh->count,  lbn = rh->start,  dta = rh->dta;
   while (count > 0) {
       sendct = (count > 16) ? 16 : count;
+      if (Debug) t_io0 = bios_ticks();
       status = SDRead(rh->rh.unit, lbn, dta, sendct);
+      if (Debug) { t_io1 = bios_ticks(); rb_ticks_io += (t_io1 - t_io0); }
       if (status != RES_OK)  {
    if (Debug) cdprintf("SD: read error - status=%d\n", status);
    fmemset(dta, 0, BLOCKSIZE);
@@ -202,6 +272,14 @@ PUBLIC void ReadBlock (rh_io_t far *rh)
     dta += (sendct*BLOCKSIZE);
   }
   rh->rh.status = DONE;
+
+  if (Debug) {
+    t_end = bios_ticks();
+    rb_ticks_total += (t_end - t_start);
+    rb_call_count++;
+    cdprintf("SD: RB timing: call=%u cum_total=%L cum_io=%L ticks(~55ms ea)\n",
+      rb_call_count, rb_ticks_total, rb_ticks_io);
+  }
 }
 
 
