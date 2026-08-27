@@ -16,7 +16,7 @@ BOOLEAN SDInitialize (BYTE unit, BYTE partno, bpb_t *bpb);
 int SDRead (WORD, WORD, BYTE far *, WORD count);
 /* SDWrite - write one 512 byte logical block to the tape */
 int SDWrite (WORD, WORD, BYTE far *, WORD count);
-/* SDMediaCheck - check if media changed */
-BOOLEAN SDMediaCheck (BYTE unit);
+/* SDMediaCheck - check if media changed: -1/0/1, see SD.C*/
+int SDMediaCheck (BYTE unit);
 
 #endif

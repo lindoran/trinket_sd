@@ -193,14 +193,3 @@ PATH C:\;C:\BC31\BIN;%PATH%
 
   Additionally, the driver loads, maps to D: and then provides accsess to the sd card.
 
-## TODO:
-
-1) investigate *Multi-block read/write** (`CMD18`/`CMD25`). `sdtest.c` never had
-  it either -- `disk_read()`/`disk_write()` here just loop the
-  single-block `CMD17`/`CMD24` commands sector by sector. Correct, not
-  fast: per `sdtest.c`'s own header comment, every SPI byte costs two
-  full dispatch round trips over the parallel link, so large transfers
-  will be slow until/unless that's revisited.  -- this is likely one of the reasons
-  bringing up the total volume size in DIR takes so long
-
-2) verify the work done by Gemini Flash (check for bugs, coding / comment errors etc)

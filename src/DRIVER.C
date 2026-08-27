@@ -37,7 +37,7 @@ PUBLIC void far SDDriver (rh_t far *);
 
 /* These data structures are exported by the HEADER.ASM module... */
 extern devhdr_t header;    /* MSDOS device header for our driver  */
-extern bpb_t bpb;          /* BIOS Parameter block "   "   "   */
+extern bpb_t bpb;          /* BIOS Parameter block "   "   "      */
 extern bpbtbl_t bpbtbl;    /* BPB table (one for each drive unit) */
 
 /*   This double word is actually a far pointer to the entry point of   */
@@ -52,7 +52,7 @@ extern unsigned char com_flag;
 /* Local data for this module... */
 BOOLEAN Debug        = FALSE; /* TRUE to enable debug (verbose) mode */
 BOOLEAN InitNeeded   = TRUE;  /* TRUE if we need to (re) initialize  */
-WORD  RebootVector[2];  /* previous INT 19H vector contents */
+WORD  RebootVector[2];        /* previous INT 19H vector contents    */
 extern DWORD partitionoffset;
 
 extern BYTE  sd_card_check;
@@ -120,18 +120,24 @@ unsigned long bios_ticks (void)
 /* reboot or reload the driver first so these start at 0).              */
 static DWORD rb_ticks_total = 0;
 static DWORD rb_ticks_io    = 0;
+static DWORD rb_ticks_gap   = 0;   /* time BETWEEN calls -- see comment below */
 static WORD  rb_call_count  = 0;
+static DWORD rb_prev_end    = 0;
 
 
-/* Media Check */
-/*   DOS calls this function to determine if the tape in the drive has  */
-/* been changed.  The SD hardware can't determine this (like many  */
-/* older 360K floppy drives), and so we always return the "Don't Know"  */
-/* response.  This works well enough...               */
+/* Media Check 
+ * we need to check if the media has changed.  This is done by reading the
+ * volume serial number from the boot sector and comparing it to the last
+ * known serial number.  If the serial number has changed, then the media
+ * has changed.  If we have not read the serial number yet, then we don't
+ * know. */
 PUBLIC void MediaCheck (rh_media_check_t far *rh)
 {
+  int mc;
   if (Debug) cdprintf("SD: media check: unit=%d\n", rh->rh.unit);
-  rh->media_status = SDMediaCheck(rh->rh.unit) ? -1 : 0;
+  mc = SDMediaCheck(rh->rh.unit);
+  if (mc < 0) InitNeeded = TRUE;  /* confirmed/suspected change -- force a real re-mount before the next access */
+  rh->media_status = mc;
   rh->rh.status = DONE;
 }
 
@@ -252,7 +258,13 @@ PUBLIC void ReadBlock (rh_io_t far *rh)
   if (Debug)
     cdprintf("SD: read block: unit=%d, start=%d, count=%d, dta=%4x:%4x\n",
       rh->rh.unit, rh->start, rh->count, FP_SEG(rh->dta), FP_OFF(rh->dta));
-  if (Debug) t_start = bios_ticks();
+  if (Debug) {
+    t_start = bios_ticks();
+    /* rb_call_count is still last call's value here -- 0 only before the
+     * very first completed call, when there's no rb_prev_end yet to
+     * measure a gap against. */
+    if (rb_call_count > 0) rb_ticks_gap += (t_start - rb_prev_end);
+  }
 
   if (!drive_init ((rh_t far *) rh))  return;
   count = rh->count,  lbn = rh->start,  dta = rh->dta;
@@ -276,9 +288,10 @@ PUBLIC void ReadBlock (rh_io_t far *rh)
   if (Debug) {
     t_end = bios_ticks();
     rb_ticks_total += (t_end - t_start);
+    rb_prev_end = t_end;
     rb_call_count++;
-    cdprintf("SD: RB timing: call=%u cum_total=%L cum_io=%L ticks(~55ms ea)\n",
-      rb_call_count, rb_ticks_total, rb_ticks_io);
+    cdprintf("SD: RB timing: call=%x cum_total=%L cum_io=%L cum_gap=%L ticks(~55ms ea)\n",
+      rb_call_count, rb_ticks_total, rb_ticks_io, rb_ticks_gap);
   }
 }
 

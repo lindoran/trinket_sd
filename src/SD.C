@@ -37,6 +37,8 @@
 #include "cprint.h"
 
 DWORD partition_offset = 0;
+static DWORD last_known_serial = 0;
+static BOOLEAN have_serial = FALSE;
 
 /* FatFs refers the members in the FAT structures as byte array instead of
 / structure member because the structure is not binary compatible between
@@ -184,6 +186,10 @@ int find_volume (
    bpb->hidden_sectors = 1;
 
    partition_offset = bsect;
+   /* local_buffer still holds this volume's boot sector here -- no exta
+    * read needed. FAT16 only (BS_VolID, offset 39). */
+   last_known_serial = LD_DWORD(local_buffer + BS_VolID);
+   have_serial = TRUE;
    return 0;
 }
 
@@ -196,10 +202,36 @@ PUBLIC BOOLEAN SDInitialize (BYTE unit, BYTE partno, bpb_t *bpb)
   return TRUE;
 }
 
-/* SDMediaCheck */
-PUBLIC BOOLEAN SDMediaCheck (BYTE unit)
+static BOOLEAN read_volume_serial (BYTE unit, DWORD *serial)
 {
-  return (disk_result(unit) == RES_OK) ? FALSE : TRUE;
+  if (SDRead(unit, 0, local_buffer, 1) != RES_OK)
+    return FALSE;
+  *serial = LD_DWORD(local_buffer + BS_VolID);
+  return TRUE;
+}
+
+/* SDMediaCheck */
+/*   Returns -1/0/1 directly (M_CHANGED/M_DONT_KNOW/M_NOT_CHANGED, per   */
+/* the FreeDOS kernel's hdr/device.h) so DRIVER.C can pass it straight   */
+/* through. Not initialized / last op errored: -1 (same as before this  */
+/* change). No serial captured yet, or this read fails: 0 -- genuinely  */
+/* don't know. Serial mismatch: -1 -- real evidence of a change, not    */
+/* just uncertainty. Serial matches: 1 -- the only case actually backed */
+/* by evidence, which is what lets DOS's own free-cluster cache survive */
+/* between calls instead of being torn down every time.                 */
+PUBLIC int SDMediaCheck (BYTE unit)
+{
+  DWORD current_serial;
+
+  if (disk_result(unit) != RES_OK)
+    return -1;
+  if (!have_serial)
+    return 0;
+  if (!read_volume_serial(unit, &current_serial))
+    return 0;
+  if (current_serial != last_known_serial)
+    return -1;
+  return 1;
 }
 
 /* SDRead */
