@@ -249,6 +249,25 @@ BOOLEAN drive_init (rh_t far *rh)
 /* even longer than a normal slow DIR because of that console output;    */
 /* the cumulative ticks in the last printed line are the numbers that    */
 /* matter, not this particular run's stopwatch time.                     */
+/* Same far-pointer-wraparound bug as TRINKET.C's disk_read/disk_write
+ * (see advance_far_ptr() there for the full explanation), and arguably
+ * more exposed here: this loop's dta += (sendct*BLOCKSIZE) can advance
+ * by up to 16*512=8192 bytes per iteration instead of 512. Kept as its
+ * own copy rather than shared with TRINKET.C to avoid restructuring
+ * headers across this multi-generation file -- see this file's own
+ * patch-history notes on why small direct edits beat larger refactors
+ * here. 16-bit-only arithmetic is required, not just convenient: see
+ * TRINKET.C's copy for why a 32-bit shift/multiply here would risk the
+ * exact exception 06 this driver already hit once from this call path. */
+static BYTE far *advance_far_ptr(BYTE far *p, WORD add_bytes)
+{
+   WORD seg = FP_SEG(p);
+   WORD off = FP_OFF(p);
+   WORD new_off = off + add_bytes;
+   WORD new_seg = seg + ((new_off < off) ? 4096 : 0);
+   return (BYTE far *) MK_FP(new_seg, new_off);
+}
+
 PUBLIC void ReadBlock (rh_io_t far *rh)
 {
   WORD lbn, count;  int status;  BYTE far *dta;
@@ -281,7 +300,7 @@ PUBLIC void ReadBlock (rh_io_t far *rh)
       }
     lbn += sendct;
     count -= sendct;
-    dta += (sendct*BLOCKSIZE);
+    dta = advance_far_ptr(dta, sendct*BLOCKSIZE);
   }
   rh->rh.status = DONE;
 
@@ -320,7 +339,7 @@ PUBLIC void WriteBlock (rh_io_t far *rh, BOOLEAN verify)
     }
     lbn += sendct;
     count -= sendct;
-    dta += (sendct*BLOCKSIZE);
+    dta = advance_far_ptr(dta, sendct*BLOCKSIZE);
   }
   rh->rh.status = DONE;
 }

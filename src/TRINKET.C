@@ -66,6 +66,12 @@
 /-------------------------------------------------------------------------*/
 
 #include <conio.h>      /* inp/outp */
+#include <dos.h>        /* FP_SEG/FP_OFF/MK_FP for advance_far_ptr() -- all
+                          * three compile to Borland's _seg intrinsic here,
+                          * not generic long arithmetic (confirmed via -S),
+                          * so they're safe to use in this driver's private-
+                          * stack call path; see advance_far_ptr() itself
+                          * for the operation that isn't. */
 
 #include "diskio.h"     /* disk_* contract this module implements */
 #include "cprint.h"     /* cdprintf, for init-time diagnostics */
@@ -639,6 +645,29 @@ DSTATUS disk_initialize(BYTE drv)
    return Stat;
 }
 
+/* Plain `far` pointer arithmetic (p += 512) only ever touches the 16-bit
+ * offset half -- it does NOT carry into the segment. A multi-sector
+ * transfer into a caller's buffer that happens to sit near the top of its
+ * 64K segment (e.g. a DOS DTA) will wrap the offset back toward 0 instead
+ * of advancing into the next segment, silently reading/writing the wrong
+ * memory. This has to be fixed with 16-bit-only arithmetic: this driver
+ * runs on its own small private stack (see HEADER.ASM), and a *32-bit*
+ * shift/multiply here would compile to a call into Borland's cs.lib
+ * (N_LXLSH@/N_LXURSH@) -- confirmed via -S -- which is exactly what
+ * crashed this driver with exception 06 from this same call path before
+ * (see sd_arg_for_lba, which was fixed the same way for the same reason).
+ * FP_SEG/FP_OFF/MK_FP are fine to use here: this toolchain's <dos.h>
+ * implements them via Borland's _seg intrinsic, not long arithmetic
+ * (also confirmed via -S) -- only the offset math below needs care. */
+static BYTE DOSFAR *advance_far_ptr(BYTE DOSFAR *p, WORD add_bytes)
+{
+   WORD seg = FP_SEG(p);
+   WORD off = FP_OFF(p);
+   WORD new_off = off + add_bytes;              /* wraps mod 65536 -- fine */
+   WORD new_seg = seg + ((new_off < off) ? 4096 : 0); /* carry a 64K segment's worth of paragraphs if that wrapped */
+   return (BYTE DOSFAR *) MK_FP(new_seg, new_off);
+}
+
 DRESULT disk_read(BYTE drv, BYTE DOSFAR *buff, DWORD sector, UINT count)
 {
    BYTE DOSFAR *p = buff;
@@ -647,7 +676,7 @@ DRESULT disk_read(BYTE drv, BYTE DOSFAR *buff, DWORD sector, UINT count)
 
    while (count) {
       if (sd_read_block(sector, p) != 0) return RES_ERROR;
-      sector++;  p += 512;  count--;
+      sector++;  p = advance_far_ptr(p, 512);  count--;
    }
    return RES_OK;
 }
@@ -660,7 +689,7 @@ DRESULT disk_write(BYTE drv, const BYTE DOSFAR *buff, DWORD sector, UINT count)
 
    while (count) {
       if (sd_write_block(sector, p) != 0) return RES_ERROR;
-      sector++;  p += 512;  count--;
+      sector++;  p = (const BYTE DOSFAR *) advance_far_ptr((BYTE DOSFAR *) p, 512);  count--;
    }
    return RES_OK;
 }
