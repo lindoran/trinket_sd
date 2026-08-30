@@ -437,6 +437,7 @@ static unsigned char spi_byte(unsigned char tx_byte) {
 #define SD_OP_INIT           0x01u
 #define SD_OP_READ_SECTORS   0x02u
 #define SD_OP_WRITE_SECTORS  0x03u
+#define SD_OP_CHECK_MEDIA    0x04u
 
 #define SD_STATUS_OK     0x00u
 #define SD_STATUS_ERROR  0x01u
@@ -547,6 +548,22 @@ static int sd2_write_sectors(unsigned long lba, unsigned count,
     for (i = 0; i < total; i++) {
         if (raw_send_byte(buf[i])) return 1;
     }
+
+    if (sd2_get_result(&status, NULL, NULL, NULL, 0, NULL)) return 1;
+    return (status == SD_STATUS_OK) ? 0 : -1;
+}
+
+/* SD_OP_CHECK_MEDIA -- cheap "is the card still responding" probe (one
+ * CMD13 on the RP2040 side, no 512-byte transfer). Returns 0 if the
+ * card answered, -1 if it didn't (or no sd2_init() has succeeded this
+ * session), 1 on handshake failure. Does NOT tell you whether it's
+ * still the *same* card -- see subsys_sd.h's header comment. */
+static int sd2_check_media(void) {
+    unsigned char status;
+
+    host_select_direction(1);
+    if (raw_send_byte(DISPATCH_CMD_SD)) return 1;
+    if (raw_send_byte(SD_OP_CHECK_MEDIA)) return 1;
 
     if (sd2_get_result(&status, NULL, NULL, NULL, 0, NULL)) return 1;
     return (status == SD_STATUS_OK) ? 0 : -1;
@@ -712,11 +729,13 @@ static unsigned long sd_arg_for_lba(unsigned long lba) {
     return g_block_addressed ? lba : (lba * 512ul);
 }
 
+static unsigned char g_tx_buf[512];
+static unsigned char g_cmd_buf[512];
+
 /* CMD17 READ_SINGLE_BLOCK. buf must be >= 512 bytes. */
 static int sd_read_block(unsigned long lba, unsigned char *buf) {
     unsigned char r1, token;
     int i;
-    unsigned char tx[512];
     unsigned char discard[2];
 
     spi_op_cs(1);
@@ -738,13 +757,13 @@ static int sd_read_block(unsigned long lba, unsigned char *buf) {
         return -1;
     }
 
-    memset(tx, 0xFF, sizeof(tx));
-    if (spi_xfer(tx, 512, buf, 512, NULL) != 0) {
+    memset(g_tx_buf, 0xFF, sizeof(g_tx_buf));
+    if (spi_xfer(g_tx_buf, 512, buf, 512, NULL) != 0) {
         fprintf(stderr, "sdtest: CMD17 lba=%lu data read failed\n", lba);
         spi_op_cs(0);
         return -1;
     }
-    (void)spi_xfer(tx, 2, discard, 2, NULL);   /* trailing CRC, discarded */
+    (void)spi_xfer(g_tx_buf, 2, discard, 2, NULL);   /* trailing CRC, discarded */
 
     spi_op_cs(0);
     return 0;
@@ -753,10 +772,9 @@ static int sd_read_block(unsigned long lba, unsigned char *buf) {
 /* CMD24 WRITE_BLOCK. buf must be >= 512 bytes. */
 static int sd_write_block(unsigned long lba, const unsigned char *buf) {
     unsigned char r1, resp;
-    unsigned char tx[512];
     unsigned char token[1];
     unsigned char crc[2];
-    int i;
+    unsigned long i;
 
     spi_op_cs(1);
     r1 = sd_cmd(24, sd_arg_for_lba(lba));
@@ -772,8 +790,8 @@ static int sd_write_block(unsigned long lba, const unsigned char *buf) {
         return -1;
     }
 
-    memcpy(tx, buf, 512);
-    if (spi_xfer(tx, 512, NULL, 0, NULL) != 0) {
+    memcpy(g_tx_buf, buf, 512);
+    if (spi_xfer(g_tx_buf, 512, NULL, 0, NULL) != 0) {
         fprintf(stderr, "sdtest: CMD24 lba=%lu data write failed\n", lba);
         spi_op_cs(0);
         return -1;
@@ -789,7 +807,7 @@ static int sd_write_block(unsigned long lba, const unsigned char *buf) {
     }
 
     /* Busy-wait: card holds MISO low while programming. */
-    for (i = 0; i < 60000; i++) {
+    for (i = 0; i < 60000ul; i++) {
         if (spi_byte(0xFF) != 0x00u) break;
     }
 
@@ -835,44 +853,42 @@ static unsigned long rd_u32(const unsigned char *p) {
  * start LBA, then re-reads and checks THAT sector. Returns 0 and fills
  * in the g_* globals on success. */
 static int fat16_mount(void) {
-    unsigned char buf[512];
-
-    if (sd_read_block(0, buf) != 0) {
+    if (sd_read_block(0, g_cmd_buf) != 0) {
         fprintf(stderr, "sdtest: couldn't read sector 0\n");
         return -1;
     }
 
-    if (buf[510] != 0x55u || buf[511] != 0xAAu) {
+    if (g_cmd_buf[510] != 0x55u || g_cmd_buf[511] != 0xAAu) {
         fprintf(stderr, "sdtest: sector 0 has no 0x55AA boot signature\n");
         return -1;
     }
 
-    if (memcmp(buf + 0x36, "FAT16", 5) == 0) {
+    if (memcmp(g_cmd_buf + 0x36, "FAT16", 5) == 0) {
         g_vol_base_lba = 0;
     } else {
         /* Treat as MBR, partition entry 1 at offset 0x1BE. */
-        unsigned long part_lba = rd_u32(buf + 0x1BE + 8);
+        unsigned long part_lba = rd_u32(g_cmd_buf + 0x1BE + 8);
         if (part_lba == 0) {
             fprintf(stderr, "sdtest: sector 0 is neither a FAT16 boot sector nor a usable MBR\n");
             return -1;
         }
-        if (sd_read_block(part_lba, buf) != 0) {
+        if (sd_read_block(part_lba, g_cmd_buf) != 0) {
             fprintf(stderr, "sdtest: couldn't read partition start sector (lba=%lu)\n", part_lba);
             return -1;
         }
-        if (buf[510] != 0x55u || buf[511] != 0xAAu || memcmp(buf + 0x36, "FAT16", 5) != 0) {
+        if (g_cmd_buf[510] != 0x55u || g_cmd_buf[511] != 0xAAu || memcmp(g_cmd_buf + 0x36, "FAT16", 5) != 0) {
             fprintf(stderr, "sdtest: partition at lba=%lu is not FAT16\n", part_lba);
             return -1;
         }
         g_vol_base_lba = part_lba;
     }
 
-    g_bytes_per_sector    = rd_u16(buf + 0x0B);
-    g_sectors_per_cluster = buf[0x0D];
-    g_reserved_sectors    = rd_u16(buf + 0x0E);
-    g_num_fats            = buf[0x10];
-    g_root_entries        = rd_u16(buf + 0x11);
-    g_fat_size_sectors    = rd_u16(buf + 0x16);
+    g_bytes_per_sector    = rd_u16(g_cmd_buf + 0x0B);
+    g_sectors_per_cluster = g_cmd_buf[0x0D];
+    g_reserved_sectors    = rd_u16(g_cmd_buf + 0x0E);
+    g_num_fats            = g_cmd_buf[0x10];
+    g_root_entries        = rd_u16(g_cmd_buf + 0x11);
+    g_fat_size_sectors    = rd_u16(g_cmd_buf + 0x16);
 
     if (g_bytes_per_sector != 512) {
         fprintf(stderr, "sdtest: bytes/sector=%u not supported (only 512)\n", g_bytes_per_sector);
@@ -1043,19 +1059,18 @@ static int cmd_cat(const char *name) {
 }
 
 static int cmd_readsector(unsigned long lba) {
-    unsigned char buf[512];
     unsigned i;
 
     if (sd_init() != 0) return 1;
-    if (sd_read_block(lba, buf) != 0) return 1;
+    if (sd_read_block(lba, g_cmd_buf) != 0) return 1;
 
     for (i = 0; i < 512; i += 16) {
         unsigned j;
         printf("%04X: ", i);
-        for (j = 0; j < 16; j++) printf("%02X ", buf[i + j]);
+        for (j = 0; j < 16; j++) printf("%02X ", g_cmd_buf[i + j]);
         printf(" ");
         for (j = 0; j < 16; j++) {
-            unsigned char c = buf[i + j];
+            unsigned char c = g_cmd_buf[i + j];
             putchar((c >= 32 && c < 127) ? (char)c : '.');
         }
         putchar('\n');
@@ -1064,7 +1079,6 @@ static int cmd_readsector(unsigned long lba) {
 }
 
 static int cmd_writesector(unsigned long lba, int confirmed) {
-    unsigned char buf[512];
     unsigned i;
 
     if (!confirmed) {
@@ -1077,11 +1091,11 @@ static int cmd_writesector(unsigned long lba, int confirmed) {
     }
 
     for (i = 0; i < 512; i++) {
-        buf[i] = (unsigned char)(i & 0xFFu);
+        g_cmd_buf[i] = (unsigned char)(i & 0xFFu);
     }
 
     if (sd_init() != 0) return 1;
-    if (sd_write_block(lba, buf) != 0) return 1;
+    if (sd_write_block(lba, g_cmd_buf) != 0) return 1;
 
     printf("sdtest: wrote test pattern to lba=%lu\n", lba);
     return 0;
@@ -1131,7 +1145,6 @@ static unsigned long bios_ticks(unsigned char *midnight_flag) {
 }
 
 static int cmd_bench(unsigned long lba, unsigned count) {
-    unsigned char buf[512];
     unsigned long t0, t1, elapsed_ticks, elapsed_ms;
     unsigned char midnight;
     unsigned i;
@@ -1142,11 +1155,11 @@ static int cmd_bench(unsigned long lba, unsigned count) {
 
     t0 = bios_ticks(NULL);
     for (i = 0; i < count; i++) {
-        if (sd_read_block(lba, buf) != 0) {
+        if (sd_read_block(lba, g_cmd_buf) != 0) {
             fprintf(stderr, "sdtest: bench: read #%u failed, aborting\n", i);
             return 1;
         }
-        /* buf intentionally untouched beyond this -- next iteration
+        /* g_cmd_buf intentionally untouched beyond this -- next iteration
          * overwrites it, nothing here reads or prints it. */
     }
     t1 = bios_ticks(&midnight);
@@ -1186,14 +1199,33 @@ static int cmd_fastinit(void) {
     return 0;
 }
 
+/* fastcheck -- exercises SD_OP_CHECK_MEDIA (ENHANCEMENTS.md point 3's
+ * firmware-side half) on its own, without an init first, so it's also
+ * a test of the "not initialized yet" path: run this as the very
+ * first command after a fresh flash/reset and it should report
+ * not-responding, not crash or hang. Run `fastinit` first to see it
+ * flip to responding. */
+static int cmd_fastcheck(void) {
+    int rc = sd2_check_media();
+    if (rc == 0) {
+        printf("sdtest: fastcheck: card responding\n");
+        return 0;
+    }
+    if (rc == -1) {
+        fprintf(stderr, "sdtest: fastcheck: card NOT responding (or no successful fastinit/fastread/fastwrite/fastbench yet this session)\n");
+        return 1;
+    }
+    fprintf(stderr, "sdtest: fastcheck: handshake failure\n");
+    return 1;
+}
+
 static int cmd_fastread(unsigned long lba, unsigned count) {
-    unsigned char buf[512];
     int is_v2 = 0, block_addressed = 0;
     unsigned i;
 
     if (count == 0) count = 1;
     if (sd2_init(&is_v2, &block_addressed) != 0) return 1;
-    if (sd2_read_sectors(lba, count, buf, sizeof(buf)) != 0) {
+    if (sd2_read_sectors(lba, count, g_cmd_buf, sizeof(g_cmd_buf)) != 0) {
         fprintf(stderr, "sdtest: fastread: SD_OP_READ_SECTORS failed\n");
         return 1;
     }
@@ -1202,10 +1234,10 @@ static int cmd_fastread(unsigned long lba, unsigned count) {
     for (i = 0; i < 512; i += 16) {
         unsigned j;
         printf("%04X: ", i);
-        for (j = 0; j < 16; j++) printf("%02X ", buf[i + j]);
+        for (j = 0; j < 16; j++) printf("%02X ", g_cmd_buf[i + j]);
         printf(" ");
         for (j = 0; j < 16; j++) {
-            unsigned char c = buf[i + j];
+            unsigned char c = g_cmd_buf[i + j];
             putchar((c >= 32 && c < 127) ? (char)c : '.');
         }
         putchar('\n');
@@ -1214,7 +1246,6 @@ static int cmd_fastread(unsigned long lba, unsigned count) {
 }
 
 static int cmd_fastwrite(unsigned long lba, int confirmed) {
-    unsigned char buf[512];
     unsigned i;
     int is_v2 = 0, block_addressed = 0;
 
@@ -1225,14 +1256,13 @@ static int cmd_fastwrite(unsigned long lba, int confirmed) {
         return 3;
     }
 
-    for (i = 0; i < 512; i++) buf[i] = (unsigned char)(i & 0xFFu);
+    for (i = 0; i < 512; i++) g_cmd_buf[i] = (unsigned char)(i & 0xFFu);
 
     if (sd2_init(&is_v2, &block_addressed) != 0) return 1;
-    if (sd2_write_sectors(lba, 1, buf) != 0) {
+    if (sd2_write_sectors(lba, 1, g_cmd_buf) != 0) {
         fprintf(stderr, "sdtest: fastwrite: SD_OP_WRITE_SECTORS failed\n");
         return 1;
     }
-
     printf("sdtest: fastwrite: wrote test pattern to lba=%lu\n", lba);
     return 0;
 }
@@ -1315,7 +1345,7 @@ int main(int argc, char **argv) {
     if (cmd == NULL) {
         fprintf(stderr,
             "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]|\n"
-            "               fastinit|fastread LBA [COUNT]|fastwrite LBA -y|fastbench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
+            "               fastinit|fastcheck|fastread LBA [COUNT]|fastwrite LBA -y|fastbench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
         return 3;
     }
 
@@ -1343,6 +1373,8 @@ int main(int argc, char **argv) {
         rc = cmd_bench(lba, (unsigned)count);
     } else if (strcmp(cmd, "fastinit") == 0) {
         rc = cmd_fastinit();
+    } else if (strcmp(cmd, "fastcheck") == 0) {
+        rc = cmd_fastcheck();
     } else if (strcmp(cmd, "fastread") == 0 && nargs >= 1) {
         /* LBA required (hex), COUNT optional (decimal, default 1). */
         unsigned long lba   = parse_hex_ul(args[0]);
@@ -1359,7 +1391,7 @@ int main(int argc, char **argv) {
     } else {
         fprintf(stderr,
             "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]|\n"
-            "               fastinit|fastread LBA [COUNT]|fastwrite LBA -y|fastbench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
+            "               fastinit|fastcheck|fastread LBA [COUNT]|fastwrite LBA -y|fastbench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
         rc = 3;
     }
 

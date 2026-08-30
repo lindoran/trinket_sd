@@ -1,20 +1,19 @@
-# Normal DOS EXE build -- unlike the driver itself, this program uses the
-# regular ia16-elf-gcc DOS runtime/libc (stdio, crt0), same as
-# client/ifacetest.c already does. No special cmodel/freestanding flags
-# needed here.
+# DOS EXE build. Use -mcmodel=small so code and data/stack get separate
+# 64KB segments instead of cramming everything into a single 64KB Tiny segment.
 
 CC = ia16-elf-gcc
+CFLAGS = -mcmodel=small -Wall -Wextra
 
 all: DRVTEST.EXE IFTEST.EXE SDTEST.EXE
 
 DRVTEST.EXE: drvtest.c
-	$(CC) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $<
 
 IFTEST.EXE: ifacetest.c
-	$(CC) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $<
 
 SDTEST.EXE: sdtest.c
-	$(CC) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $<
 
 clean: 
 	rm -f DRVTEST.EXE IFTEST.EXE SDTEST.EXE	

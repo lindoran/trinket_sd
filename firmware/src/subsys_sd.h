@@ -25,13 +25,23 @@
  * sd_write_sectors()'s internals below without touching this file's
  * wire protocol at all.
  *
- * Also deliberately NOT included: SD_CMD_CHECK_MEDIA (ENHANCEMENTS.md
- * point 3's firmware-side half). Point 3's host-side VolID caching is
- * already done (SD.C's SDMediaCheck, informally "0005"). A firmware
- * status-check op is a natural, small follow-on once this subsystem is
- * confirmed on hardware -- an SD_OP_* case slots in the same way
- * SD_OP_INIT/READ/WRITE did, nothing about this file's shape needs to
- * change to add it.
+ * Also included: SD_OP_CHECK_MEDIA (ENHANCEMENTS.md point 3's firmware-
+ * side half). Point 3's host-side VolID caching is already done (SD.C's
+ * SDMediaCheck, informally "0005") and still does a real disk_read(0,1)
+ * every call to compare BS_VolID -- that's correct and stays as the
+ * authority on "did the media actually change". SD_OP_CHECK_MEDIA is a
+ * much cheaper *pre-filter* for the other common case a media check
+ * needs to handle fast: the card being gone entirely. It answers "is
+ * the card even responding" with one lightweight SD command (CMD13)
+ * instead of a full 512-byte sector transfer with its data-token wait,
+ * so a disconnected/dead card fails fast instead of running through
+ * disk_read()'s full timeout/retry path. It deliberately does NOT and
+ * cannot replace the VolID comparison -- a card that's electrically
+ * present but has been swapped for a different one still answers CMD13
+ * just fine, so "card responding" is necessary but not sufficient
+ * evidence that it's the *same* card. Not yet wired into SD.C/
+ * DRIVER.C -- that's the driver-migration step this subsystem's
+ * SD_OP_INIT/READ/WRITE aren't wired into yet either.
  *
  * Hardware: same physical pins as subsys_spi.h (H3 header, GPIO0-3),
  * driven independently rather than through that subsystem -- see this
@@ -92,6 +102,14 @@
  *       handle_op_xfer() TX phase). Writes `count` consecutive 512-byte
  *       sectors via `count` sequential CMD24s.
  *
+ *     SD_OP_CHECK_MEDIA (0x04): no further bytes. Issues one CMD13
+ *       (SEND_STATUS) and reports whether a valid R1 came back within
+ *       the same short retry budget sd_cmd() always uses -- SD_STATUS_OK
+ *       means the card answered, SD_STATUS_ERROR means it didn't (or no
+ *       SD_OP_INIT has succeeded yet this session, checked first without
+ *       touching the bus). See this file's header comment above for what
+ *       this does and doesn't tell you.
+ *
  *     Any other first byte: unrecognized opcode, logged and dropped --
  *     same "log and drop, host will desync" convention as
  *     subsys_spi.h's own unknown-opcode case.
@@ -136,6 +154,7 @@
 #define SD_OP_INIT           0x01u   /* no payload */
 #define SD_OP_READ_SECTORS   0x02u   /* lba(4,LE), count(1) */
 #define SD_OP_WRITE_SECTORS  0x03u   /* lba(4,LE), count(1), count*512 data */
+#define SD_OP_CHECK_MEDIA    0x04u   /* no payload */
 
 /* Status byte -- first byte of a Read-direction response. */
 #define SD_STATUS_OK     0x00u
@@ -172,17 +191,21 @@ void subsys_sd_init(void);
  * wire.h). */
 bool subsys_sd_run(void);
 
-/* Clears this subsystem's own state on an nAuto-LF reset: deasserts
- * CS, discards any unread SD_OP_READ_SECTORS result (a following Read
- * reports SD_STATUS_ERROR until a new op completes), and restores the
- * safe default clock rate/mode. Does NOT reset is_v2/block_addressed
- * to 0 -- those reflect "what the last successful init found," which
- * stays meaningful/harmless to report across a reset that doesn't
- * itself re-run SD_OP_INIT; a caller relying on current card state
- * after a reset should re-issue SD_OP_INIT regardless, same as
- * TRINKET.C's disk_initialize() already does unconditionally on every
- * (re)load. main.c calls this right after wire_do_reset_sequence(),
- * same as subsys_spi_reset(). */
+/* Resets the subsystem's protocol/framing state on an nAuto-LF reset:
+ * deasserts CS, discards any unread SD_OP_READ_SECTORS result (a
+ * following Read reports SD_STATUS_ERROR until a new op completes),
+ * and restores the safe default clock rate/mode. This reset does not
+ * reinitialize the SD card itself, so it intentionally does not clear
+ * sd_initialized: the card remains initialized across a wire-protocol
+ * reset, and a fresh SD_OP_INIT is still the only legitimate way to
+ * establish a new card state after power-up or a failed re-init. Does
+ * NOT reset is_v2/block_addressed to 0 -- those reflect "what the last
+ * successful init found" and remain meaningful to report across a
+ * framing-only reset. A caller relying on current card state after a
+ * reset should re-issue SD_OP_INIT regardless, same as TRINKET.C's
+ * disk_initialize() already does unconditionally on every (re)load.
+ * main.c calls this right after wire_do_reset_sequence(), same as
+ * subsys_spi_reset(). */
 void subsys_sd_reset(void);
 
 /* Enables/disables this subsystem's routine per-operation printf()

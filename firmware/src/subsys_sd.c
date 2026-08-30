@@ -62,6 +62,7 @@ static uint16_t sd_last_len;                     // valid bytes in sd_buf for th
 static uint8_t sd_last_status;                   // SD_STATUS_OK / SD_STATUS_ERROR
 static bool sd_is_v2;                            // from the last successful SD_OP_INIT
 static bool sd_block_addressed;                  // ditto
+static bool sd_initialized;                      // has SD_OP_INIT ever succeeded this session; left alone across a protocol reset because the card itself is not reinitialized by that reset
 
 static bool debug_enabled = false;
 
@@ -92,6 +93,7 @@ void subsys_sd_init(void) {
     sd_last_status = SD_STATUS_ERROR;
     sd_is_v2 = false;
     sd_block_addressed = false;
+    sd_initialized = false;
 }
 
 void subsys_sd_reset(void) {
@@ -101,6 +103,11 @@ void subsys_sd_reset(void) {
 
     sd_last_len = 0;
     sd_last_status = SD_STATUS_ERROR;
+    // Do not clear sd_initialized here: an nAuto-LF framing reset only
+    // resynchronizes the parallel-port protocol state and does not power-
+    // cycle or reinitialize the SD card itself. The card's SPI init state
+    // persists across this reset, so a fresh SD_OP_INIT is the only thing
+    // that legitimately clears the "card is live" flag.
     // sd_is_v2/sd_block_addressed deliberately left alone -- see
     // subsys_sd_reset()'s header comment in subsys_sd.h.
 }
@@ -251,6 +258,26 @@ static uint32_t sd_arg_for_lba(uint32_t lba) {
     return sd_block_addressed ? lba : (lba * 512u);
 }
 
+/* CMD13 SEND_STATUS -- the cheapest legal SD command post-init, used
+ * here purely as a "is anything on the other end of this SPI bus"
+ * probe: SD_STATUS_OK means a valid R1 came back inside sd_cmd()'s
+ * usual retry budget, SD_STATUS_ERROR means it didn't. Deliberately
+ * ignores the actual status bits R1 carries (illegal command, CRC
+ * error, etc.) -- for this probe's purpose those all still count as
+ * "card is there and talking", which is all SD_OP_CHECK_MEDIA claims
+ * to answer (see subsys_sd.h's header comment on why this can't and
+ * doesn't replace the real VolID comparison). */
+static bool sd_check_media(void) {
+    uint8_t r1;
+
+    if (!sd_initialized) return false;
+
+    cs_assert();
+    r1 = sd_cmd(13, 0);
+    cs_deassert();
+    return !(r1 & 0x80u);
+}
+
 /* CMD17 READ_SINGLE_BLOCK into out[0..511]. Returns true on success. */
 static bool sd_read_one_sector(uint32_t lba, uint8_t *out) {
     uint8_t r1, token;
@@ -334,6 +361,7 @@ static bool recv_next_byte(uint8_t *out) {
 
 static bool handle_op_init(void) {
     bool ok = sd_do_init();
+    sd_initialized = ok;
     sd_last_status = ok ? SD_STATUS_OK : SD_STATUS_ERROR;
     sd_last_len = 0;
     return true;
@@ -420,6 +448,16 @@ static bool handle_op_write_sectors(void) {
     return true;
 }
 
+static bool handle_op_check_media(void) {
+    bool ok = sd_check_media();
+    sd_last_status = ok ? SD_STATUS_OK : SD_STATUS_ERROR;
+    sd_last_len = 0;
+    if (debug_enabled) {
+        printf("SD: CHECK_MEDIA %s\n", ok ? "card responding" : "no response / not initialized");
+    }
+    return true;
+}
+
 static bool run_write_side(void) {
     uint8_t opcode;
 
@@ -434,6 +472,8 @@ static bool run_write_side(void) {
             return handle_op_read_sectors();
         case SD_OP_WRITE_SECTORS:
             return handle_op_write_sectors();
+        case SD_OP_CHECK_MEDIA:
+            return handle_op_check_media();
         default:
             printf("SD: unknown op 0x%02X -- ignoring\n", opcode);
             return true;
