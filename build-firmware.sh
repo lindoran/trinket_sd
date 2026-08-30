@@ -13,5 +13,8 @@ cmake -S "$FIRMWARE_DIR" -B "$BUILD_DIR" \
     -DPICO_SDK_PATH="$SDK_PATH" \
     -DPICO_BOARD="$BOARD"
 cmake --build "$BUILD_DIR" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
+cd "./firmware/client" && make
+cd "$ROOT_DIR"
 
-printf '\nBuilt firmware: %s\n' "$BUILD_DIR/trinket_ifacetest.uf2"
+
+printf '\nBuilt firmware: %s\n' "$BUILD_DIR/trinket_sd.uf2"

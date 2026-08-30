@@ -32,7 +32,7 @@ cmake_minimum_required(VERSION 3.13)
 # Pull in the SDK -- this must happen before project()
 include(pico_sdk_import.cmake)
 
-project(trinket_ifacetest C CXX ASM)
+project(trinket_sd C CXX ASM)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -42,7 +42,7 @@ set(PICO_BOARD pico CACHE STRING "Board type")
 
 pico_sdk_init()
 
-add_executable(trinket_ifacetest
+add_executable(trinket_sd
     src/main.c
     src/wire.c
     src/dispatch.c
@@ -57,13 +57,13 @@ add_executable(trinket_ifacetest
 # driven manually rather than by the peripheral's automatic CS. No
 # hardware_pio -- still not needed, this project talks to the LPT link
 # with plain GPIO handshakes same as before.
-target_link_libraries(trinket_ifacetest
+target_link_libraries(trinket_sd
     pico_stdlib
     hardware_spi
 )
 
-pico_add_extra_outputs(trinket_ifacetest)
+pico_add_extra_outputs(trinket_sd)
 
 # USB CDC console carries the WRITE/READ trace printf's -- see main.c.
-pico_enable_stdio_usb(trinket_ifacetest 1)
-pico_enable_stdio_uart(trinket_ifacetest 0)
+pico_enable_stdio_usb(trinket_sd 1)
+pico_enable_stdio_uart(trinket_sd 0)

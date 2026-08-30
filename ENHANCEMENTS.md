@@ -76,12 +76,22 @@ static BYTE far* normalize_far_ptr(BYTE far *p, WORD add_bytes) {
 
 ---
 
+## Current Repo Status (as implemented today)
+
+The project has already moved the main SD logic onto the RP2040 firmware and added the fast-path `fast*` client checks. The original enhancement list still describes the conceptual next steps, but the code in this repo reflects the following actual status:
+
+- **1. High-Level Firmware Offloading**: implemented in `firmware/src/subsys_sd.*` and exercised by the `fastinit` / `fastcheck` / `fastbench` client commands in `firmware/client/sdtest.c`.
+- **2. Multi-Block Reads/Writes (`CMD18` / `CMD25`)**: not implemented in the current firmware; the implementation still loops sector-by-sector.
+- **3. Media Check / VolID Caching**: firmware-side `SD_OP_CHECK_MEDIA` is implemented; host-side VolID caching is still a separate follow-up and not yet in this repo.
+- **4. SPP Wire Protocol Tuning**: the low-level nibble handshakes are implemented in C (`io_delay`, `host_reset`, `raw_send_byte`, `raw_recv_byte`); the fully hand-written assembly unroll described in the proposal is not present.
+- **5. Far Pointer Normalization**: implemented in the legacy DOS-side code path, in `src/TRINKET.C` via `advance_far_ptr()`. The fix is used by `disk_read()` / `disk_write()` and carries segment wraparound across 64KB boundaries instead of just incrementing the offset.
+
 ## Summary of Enhancements
 
-| Enhancement | Target Area | Estimated Speedup / Impact |
-| :--- | :--- | :--- |
-| **High-Level SD Subsystem** | RP2040 Firmware & `TRINKET.C` | **3x–5x overall throughput increase** by eliminating LPT SPI byte polling. |
-| **Multi-Block Reads (`CMD18`)** | RP2040 Firmware | **2x–3x faster multi-sector transfers** (cluster reads in FreeDOS). |
-| **VolID / Media Check Caching** | `SD.C` & FreeDOS Kernel | **Instant response for `DIR` / `COPY`** by eliminating Sector 0 reads on media check. |
-| **Unrolled SPP Nibble Assembly** | `TRINKET.C` | **1.5x–2x faster raw wire throughput** in nibble mode. |
-| **Far Pointer Normalization** | `TRINKET.C` & `DRIVER.C` | Prevents real-mode memory corruption across 64KB segment boundaries. |
+| Enhancement | Target Area | Status | Notes |
+| :--- | :--- | :--- | :--- |
+| **High-Level SD Subsystem** | RP2040 Firmware & client test harness | **Implemented** | SD protocol logic now lives in `firmware/src/subsys_sd.c`; host sends high-level ops and the RP2040 executes the real SD sequence. |
+| **Multi-Block Reads (`CMD18`)** | RP2040 Firmware | **Planned / Not yet implemented** | Current code still performs per-sector loops. |
+| **VolID / Media Check Caching** | `SD.C` / host driver layer | **Partial** | `SD_OP_CHECK_MEDIA` firmware check is present; host-side media-change caching is still separate from the current repo. |
+| **Unrolled SPP Nibble Assembly** | `TRINKET.C` / raw client path | **Partially implemented** | Same protocol tuning exists in C in `firmware/client/sdtest.c`; no hand-written assembly unroll has been added here. |
+| **Far Pointer Normalization** | Legacy DOS-side driver path | **Implemented** | The fix is in `src/TRINKET.C` (`advance_far_ptr()`), not in the firmware tree. |
