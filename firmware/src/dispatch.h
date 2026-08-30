@@ -58,6 +58,7 @@
  */
 #define DISPATCH_CMD_TEST_HARNESS  0x01u   /* see subsys_testharness.h */
 #define DISPATCH_CMD_SPI           0x02u   /* see subsys_spi.h */
+#define DISPATCH_CMD_SD            0x03u   /* see subsys_sd.h */
 
 /* Waits for and handles exactly one dispatch cycle: block for the
  * command byte's Init pulse, read the byte, then hand off the very next

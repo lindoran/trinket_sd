@@ -10,6 +10,7 @@
 #include "wire.h"
 #include "subsys_testharness.h"
 #include "subsys_spi.h"
+#include "subsys_sd.h"
 
 bool dispatch_run_one(void) {
     // A command byte's own handshake looks exactly like any other
@@ -45,6 +46,9 @@ bool dispatch_run_one(void) {
 
         case DISPATCH_CMD_SPI:
             return subsys_spi_run();
+
+        case DISPATCH_CMD_SD:
+            return subsys_sd_run();
 
         default:
             // Unknown command: log and go back to idle. No payload

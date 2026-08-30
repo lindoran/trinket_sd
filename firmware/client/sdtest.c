@@ -418,6 +418,141 @@ static unsigned char spi_byte(unsigned char tx_byte) {
 }
 
 /* ===================================================================
+ * Section 2b: DISPATCH_CMD_SD sub-protocol -- the new high-level SD
+ * dispatch (ENHANCEMENTS.md point 1, src/subsys_sd.h). Mirrors that
+ * file's framing exactly, same "no shared header across toolchains,
+ * values must match by hand" caveat as Section 2 above.
+ *
+ * The `fast*` commands (Section 5c) use ONLY this section -- never
+ * Section 2's spi_xfer()/dispatch_send_spi_op() or Section 3's
+ * sd_cmd()/sd_init()/sd_read_block() -- so a side-by-side run of e.g.
+ * `bench` (old path, Section 2+3) against `fastbench` (new path, this
+ * section) is a clean A/B of the two over the exact same card and
+ * wiring: same LBA, same count, same BIOS-tick timing, only the wire
+ * protocol underneath differs.
+ * =================================================================== */
+
+#define DISPATCH_CMD_SD  0x03u
+
+#define SD_OP_INIT           0x01u
+#define SD_OP_READ_SECTORS   0x02u
+#define SD_OP_WRITE_SECTORS  0x03u
+
+#define SD_STATUS_OK     0x00u
+#define SD_STATUS_ERROR  0x01u
+
+#define SD_MAX_SECTORS  60u   /* 60 sectors * 512 = 30KB, fits within 16-bit GCC 32KB limit */
+
+/* Fetches the result of the most recently completed SD_OP_* (see
+ * subsys_sd.h's Read-direction framing: status, is_v2, block_addressed,
+ * len_lo, len_hi, then len data bytes). Same truncate-past-bufcap /
+ * drain-everything-off-the-wire behavior as spi_get_result() above. */
+static int sd2_get_result(unsigned char *out_status, int *out_is_v2,
+                           int *out_block_addressed, unsigned char *buf,
+                           unsigned bufcap, unsigned *out_len) {
+    unsigned char status, is_v2, block_addressed, len_lo, len_hi, b;
+    unsigned len, i;
+
+    host_select_direction(1);
+    if (raw_send_byte(DISPATCH_CMD_SD)) return 1;
+    host_select_direction(0);
+
+    if (raw_recv_byte(&status)) return 1;
+    if (raw_recv_byte(&is_v2)) return 1;
+    if (raw_recv_byte(&block_addressed)) return 1;
+    if (raw_recv_byte(&len_lo)) return 1;
+    if (raw_recv_byte(&len_hi)) return 1;
+    len = (unsigned)len_lo | ((unsigned)len_hi << 8);
+
+    for (i = 0; i < len; i++) {
+        if (raw_recv_byte(&b)) return 1;
+        if (buf != NULL && i < bufcap) buf[i] = b;
+    }
+
+    *out_status = status;
+    if (out_is_v2 != NULL) *out_is_v2 = is_v2 ? 1 : 0;
+    if (out_block_addressed != NULL) *out_block_addressed = block_addressed ? 1 : 0;
+    if (out_len != NULL) *out_len = len;
+    return 0;
+}
+
+/* SD_OP_INIT -- runs the whole CMD0..ACMD41/CMD58/CMD16 bring-up on
+ * the RP2040 itself, no per-SD-command round trip over the parallel
+ * link (contrast Section 3's sd_init() below, which is 1-2 dispatch
+ * round trips per SPI byte). Returns 0 on success (*out_is_v2/
+ * *out_block_addressed set), 1 on handshake failure, -1 if the card
+ * itself failed to init (see the firmware's USB-CDC log for which
+ * step). */
+static int sd2_init(int *out_is_v2, int *out_block_addressed) {
+    unsigned char status;
+
+    host_select_direction(1);
+    if (raw_send_byte(DISPATCH_CMD_SD)) return 1;
+    if (raw_send_byte(SD_OP_INIT)) return 1;
+
+    if (sd2_get_result(&status, out_is_v2, out_block_addressed, NULL, 0, NULL)) return 1;
+    return (status == SD_STATUS_OK) ? 0 : -1;
+}
+
+/* SD_OP_READ_SECTORS -- reads `count` consecutive sectors starting at
+ * `lba` in ONE dispatch round trip, into buf (>= count*512 bytes).
+ * count must be <= SD_MAX_SECTORS. Same return convention as
+ * sd2_init(). */
+static int sd2_read_sectors(unsigned long lba, unsigned count,
+                             unsigned char *buf, unsigned bufcap) {
+    unsigned char status;
+
+    if (count > SD_MAX_SECTORS) {
+        fprintf(stderr, "sdtest: sd2_read_sectors count=%u exceeds SD_MAX_SECTORS=%u\n", count, SD_MAX_SECTORS);
+        return 1;
+    }
+
+    host_select_direction(1);
+    if (raw_send_byte(DISPATCH_CMD_SD)) return 1;
+    if (raw_send_byte(SD_OP_READ_SECTORS)) return 1;
+    if (raw_send_byte((unsigned char)(lba & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)((lba >> 8) & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)((lba >> 16) & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)((lba >> 24) & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)count)) return 1;
+
+    if (sd2_get_result(&status, NULL, NULL, buf, bufcap, NULL)) return 1;
+    return (status == SD_STATUS_OK) ? 0 : -1;
+}
+
+/* SD_OP_WRITE_SECTORS -- writes `count` consecutive sectors starting
+ * at `lba` from buf (count*512 bytes) in ONE dispatch round trip
+ * (payload still sent as individual write handshakes -- there's no
+ * bulk byte-stream primitive at the wire level, same as everything
+ * else in this project). Same return convention as sd2_init(). */
+static int sd2_write_sectors(unsigned long lba, unsigned count,
+                              const unsigned char *buf) {
+    unsigned char status;
+    unsigned long total = (unsigned long)count * 512ul;
+    unsigned long i;
+
+    if (count > SD_MAX_SECTORS) {
+        fprintf(stderr, "sdtest: sd2_write_sectors count=%u exceeds SD_MAX_SECTORS=%u\n", count, SD_MAX_SECTORS);
+        return 1;
+    }
+
+    host_select_direction(1);
+    if (raw_send_byte(DISPATCH_CMD_SD)) return 1;
+    if (raw_send_byte(SD_OP_WRITE_SECTORS)) return 1;
+    if (raw_send_byte((unsigned char)(lba & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)((lba >> 8) & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)((lba >> 16) & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)((lba >> 24) & 0xFFu))) return 1;
+    if (raw_send_byte((unsigned char)count)) return 1;
+    for (i = 0; i < total; i++) {
+        if (raw_send_byte(buf[i])) return 1;
+    }
+
+    if (sd2_get_result(&status, NULL, NULL, NULL, 0, NULL)) return 1;
+    return (status == SD_STATUS_OK) ? 0 : -1;
+}
+
+/* ===================================================================
  * Section 3: SD-in-SPI-mode command layer.
  * =================================================================== */
 
@@ -1029,6 +1164,125 @@ static int cmd_bench(unsigned long lba, unsigned count) {
     return 0;
 }
 
+/* ===================================================================
+ * Section 5c: `fast*` commands -- exercise DISPATCH_CMD_SD (Section
+ * 2b) instead of the old DISPATCH_CMD_SPI + host-side SD layer
+ * (Section 2/3). Deliberately parallel to init/readsector/writesector/
+ * bench above (same argument shapes, same hex-dump style, same
+ * writesector confirmation guard) so the two paths are easy to compare
+ * command-for-command. No FAT16 layer here yet -- these are card-only,
+ * matching readsector/bench's own scope, not `init`/`dir`/`cat`'s.
+ * =================================================================== */
+
+static int cmd_fastinit(void) {
+    int is_v2 = 0, block_addressed = 0;
+    int rc = sd2_init(&is_v2, &block_addressed);
+    if (rc != 0) {
+        fprintf(stderr, "sdtest: fastinit: SD_OP_INIT failed (rc=%d)\n", rc);
+        return 1;
+    }
+    printf("sdtest: fastinit: card ready (%s, %s-addressed)\n",
+           is_v2 ? "SDv2" : "SDv1/MMC", block_addressed ? "block" : "byte");
+    return 0;
+}
+
+static int cmd_fastread(unsigned long lba, unsigned count) {
+    unsigned char buf[512];
+    int is_v2 = 0, block_addressed = 0;
+    unsigned i;
+
+    if (count == 0) count = 1;
+    if (sd2_init(&is_v2, &block_addressed) != 0) return 1;
+    if (sd2_read_sectors(lba, count, buf, sizeof(buf)) != 0) {
+        fprintf(stderr, "sdtest: fastread: SD_OP_READ_SECTORS failed\n");
+        return 1;
+    }
+
+    printf("sdtest: fastread: %u sector(s) from lba=%lu ok, first sector:\n", count, lba);
+    for (i = 0; i < 512; i += 16) {
+        unsigned j;
+        printf("%04X: ", i);
+        for (j = 0; j < 16; j++) printf("%02X ", buf[i + j]);
+        printf(" ");
+        for (j = 0; j < 16; j++) {
+            unsigned char c = buf[i + j];
+            putchar((c >= 32 && c < 127) ? (char)c : '.');
+        }
+        putchar('\n');
+    }
+    return 0;
+}
+
+static int cmd_fastwrite(unsigned long lba, int confirmed) {
+    unsigned char buf[512];
+    unsigned i;
+    int is_v2 = 0, block_addressed = 0;
+
+    if (!confirmed) {
+        /* Same guard as cmd_writesector() -- see that function's own
+         * comment for why. */
+        fprintf(stderr, "sdtest: fastwrite requires -y to confirm (this overwrites lba=%lu)\n", lba);
+        return 3;
+    }
+
+    for (i = 0; i < 512; i++) buf[i] = (unsigned char)(i & 0xFFu);
+
+    if (sd2_init(&is_v2, &block_addressed) != 0) return 1;
+    if (sd2_write_sectors(lba, 1, buf) != 0) {
+        fprintf(stderr, "sdtest: fastwrite: SD_OP_WRITE_SECTORS failed\n");
+        return 1;
+    }
+
+    printf("sdtest: fastwrite: wrote test pattern to lba=%lu\n", lba);
+    return 0;
+}
+
+/* fastbench -- direct counterpart to cmd_bench() (Section 5b), same
+ * default count/lba, same BIOS-tick timing, so the two numbers are
+ * directly comparable. The whole point of this one: cmd_bench() pays
+ * a full DISPATCH_CMD_SPI round trip's worth of framing per SPI byte
+ * inside each of its `count` separate sd_read_block() calls; this
+ * issues ONE SD_OP_READ_SECTORS request for all `count` sectors and
+ * gets ONE response back, with all `count` CMD17s happening on the
+ * RP2040 side with no parallel-link traffic in between. If
+ * ENHANCEMENTS.md point 1's "eliminates ~90% of parallel-port
+ * handshake traffic" estimate holds, this should land well under
+ * cmd_bench()'s ~22ms/block. */
+static int cmd_fastbench(unsigned long lba, unsigned count) {
+    unsigned long t0, t1, elapsed_ticks, elapsed_ms;
+    unsigned char midnight;
+    int is_v2 = 0, block_addressed = 0;
+
+    if (count == 0) count = 1;
+    if (count > SD_MAX_SECTORS) {
+        fprintf(stderr, "sdtest: fastbench: count=%u exceeds SD_MAX_SECTORS=%u\n", count, SD_MAX_SECTORS);
+        return 3;
+    }
+
+    if (sd2_init(&is_v2, &block_addressed) != 0) return 1;
+
+    printf("sdtest: fastbench: %u sector(s) at lba=%lu in one SD_OP_READ_SECTORS (data discarded)\n", count, lba);
+
+    t0 = bios_ticks(NULL);
+    if (sd2_read_sectors(lba, count, NULL, 0) != 0) {
+        fprintf(stderr, "sdtest: fastbench: SD_OP_READ_SECTORS failed\n");
+        return 1;
+    }
+    t1 = bios_ticks(&midnight);
+
+    elapsed_ticks = t1 - t0;
+    elapsed_ms = (elapsed_ticks * 54925ul) / 1000ul;
+
+    printf("sdtest: fastbench: %lu ticks (~%lu ms) for %u blocks, ~%lu ms/block\n",
+           elapsed_ticks, elapsed_ms, count,
+           count ? (elapsed_ms / count) : 0ul);
+    if (midnight) {
+        fprintf(stderr, "sdtest: fastbench: WARNING -- midnight rollover during run, timing above is unreliable\n");
+    }
+
+    return 0;
+}
+
 static unsigned long parse_hex_ul(const char *s) {
     unsigned long v = 0;
     sscanf(s, "%lx", &v);
@@ -1060,7 +1314,8 @@ int main(int argc, char **argv) {
 
     if (cmd == NULL) {
         fprintf(stderr,
-            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
+            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]|\n"
+            "               fastinit|fastread LBA [COUNT]|fastwrite LBA -y|fastbench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
         return 3;
     }
 
@@ -1086,9 +1341,25 @@ int main(int argc, char **argv) {
         unsigned long count = (nargs >= 1) ? strtoul(args[0], NULL, 10) : 57ul;
         unsigned long lba   = (nargs >= 2) ? parse_hex_ul(args[1]) : 0ul;
         rc = cmd_bench(lba, (unsigned)count);
+    } else if (strcmp(cmd, "fastinit") == 0) {
+        rc = cmd_fastinit();
+    } else if (strcmp(cmd, "fastread") == 0 && nargs >= 1) {
+        /* LBA required (hex), COUNT optional (decimal, default 1). */
+        unsigned long lba   = parse_hex_ul(args[0]);
+        unsigned long count = (nargs >= 2) ? strtoul(args[1], NULL, 10) : 1ul;
+        rc = cmd_fastread(lba, (unsigned)count);
+    } else if (strcmp(cmd, "fastwrite") == 0 && nargs >= 1) {
+        int confirmed = (nargs >= 2 && strcmp(args[1], "-y") == 0);
+        rc = cmd_fastwrite(parse_hex_ul(args[0]), confirmed);
+    } else if (strcmp(cmd, "fastbench") == 0) {
+        /* Same defaults as `bench` -- see that branch's comment. */
+        unsigned long count = (nargs >= 1) ? strtoul(args[0], NULL, 10) : 57ul;
+        unsigned long lba   = (nargs >= 2) ? parse_hex_ul(args[1]) : 0ul;
+        rc = cmd_fastbench(lba, (unsigned)count);
     } else {
         fprintf(stderr,
-            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
+            "usage: SDTEST <init|dir|cat NAME|readsector LBA|writesector LBA -y|bench [COUNT] [LBA]|\n"
+            "               fastinit|fastread LBA [COUNT]|fastwrite LBA -y|fastbench [COUNT] [LBA]> [/P=xxxx] [-v]\n");
         rc = 3;
     }
 

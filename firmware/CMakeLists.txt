@@ -48,6 +48,7 @@ add_executable(trinket_ifacetest
     src/dispatch.c
     src/subsys_testharness.c
     src/subsys_spi.c
+    src/subsys_sd.c
 )
 
 # hardware_spi drives the H3 header's real SPI0 peripheral for

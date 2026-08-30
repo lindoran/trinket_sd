@@ -88,6 +88,7 @@
 #include "dispatch.h"
 #include "subsys_testharness.h"
 #include "subsys_spi.h"
+#include "subsys_sd.h"
 
 #define KEY_ESC  0x1Bu
 
@@ -102,13 +103,14 @@
 // at the DOS prompt before/after the operation you're timing, not
 // expecting it to interrupt one already in flight.
 static void poll_debug_toggle(void) {
-    static bool spi_debug = false;   // mirrors what subsys_spi.c was last told
+    static bool debug_on = false;   // mirrors what subsys_spi.c/subsys_sd.c were last told
 
     int c = getchar_timeout_us(0);
     if (c == KEY_ESC) {
-        spi_debug = !spi_debug;
-        subsys_spi_set_debug(spi_debug);
-        printf("trinket firmware: SPI debug logging %s\n", spi_debug ? "ON" : "OFF");
+        debug_on = !debug_on;
+        subsys_spi_set_debug(debug_on);
+        subsys_sd_set_debug(debug_on);
+        printf("trinket firmware: SPI/SD debug logging %s\n", debug_on ? "ON" : "OFF");
     }
 }
 
@@ -116,13 +118,14 @@ int main(void) {
     stdio_init_all();
     wire_setup_pins();
     subsys_spi_init();       // bring up SPI0 (GPIO0-3) + CS at the safe default rate/mode
+    subsys_sd_init();        // redundant hardware bring-up, same pins -- see subsys_sd.h
     wire_setup_reset_irq();
 
     // Give USB CDC a moment to enumerate before the first printf, purely
     // so early messages aren't lost while a terminal is still attaching.
     sleep_ms(1500);
-    printf("trinket firmware: ready (dispatcher, 2 subsystems: test harness, SPI)\n");
-    printf("trinket firmware: SPI debug logging OFF by default -- press ESC on this console to toggle\n");
+    printf("trinket firmware: ready (dispatcher, 3 subsystems: test harness, SPI, SD)\n");
+    printf("trinket firmware: SPI/SD debug logging OFF by default -- press ESC on this console to toggle both\n");
 
     while (true) {
         // Checked first, every iteration: covers reset asserted between
@@ -135,6 +138,7 @@ int main(void) {
             wire_do_reset_sequence();
             subsys_testharness_reset();
             subsys_spi_reset();
+            subsys_sd_reset();
             continue;
         }
 
