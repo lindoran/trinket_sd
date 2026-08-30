@@ -9,100 +9,72 @@ This serves as two functions, one this provides a basis for how the drivers will
 ---
 
 ### What is working:
-This loads, and fires off the test from the drvtest.exe perfectly. Reset
-is implemented end to end and **confirmed working on real hardware**:
+The reset path is confirmed working end-to-end, and the current firmware
+has moved the SD logic onto the Pico itself.
 
 - `src/wire.c`: GPIO13 (nAuto-LF) is a host-driven reset line with a GPIO
-  IRQ. Asserting it (control bit1=0 -> physical pin HIGH) aborts whatever
-  handshake is in progress, parks the Pico's outputs at a known-idle
-  level, and blocks until the line is released (back LOW) before the
-  main loop clears every subsystem's own state and resumes -- see
-  `src/wire.c`'s `wire_do_reset_sequence()` for the exact detect/wait/
-  clear sequence.
-- `client/ifacetest.c` has its own `host_reset()` (a direct port-I/O
-  copy of `backend_reset()`), called unconditionally at the start of
-  `main()`, so the standalone no-driver diagnostic gets the same
-  known-starting-state guarantee.
+  IRQ. Asserting it aborts the in-flight handshake, parks the Pico's
+  outputs at a known idle state, waits for the line release, then clears
+  per-subsystem state before the main loop resumes. This is the same
+  protocol reset pattern the host-side `host_reset()` in `client/*` uses.
+- `client/ifacetest.c` and `client/sdtest.c` both call `host_reset()` at
+  the start of a standalone run to ensure a known starting state.
+- The Pico firmware is now a real command dispatcher built around
+  `src/dispatch.c` / `src/dispatch.h`, with a test-harness subsystem and
+  a dedicated SD subsystem.
+- `src/subsys_sd.c` / `src/subsys_sd.h` implement the high-level SD-over-
+  SPI protocol: `SD_OP_INIT`, `SD_OP_READ_SECTORS`, `SD_OP_WRITE_SECTORS`,
+  and `SD_OP_CHECK_MEDIA`.
+- The host-side `fast*` commands in `client/sdtest.c` (`fastinit`,
+  `fastcheck`, `fastread`, `fastwrite`, `fastbench`) exercise that
+  firmware path and are the current validation target for the SD
+  offload design.
 
+This is the important distinction: the project is no longer a pure
+single-file echo test. The current design is “wire protocol + dispatch +
+subsystems,” and the SD subsystem is the first full firmware-side
+implementation of the original enhancement plan.
 
-Also new: the Pico firmware is no longer a single-file echo test. It's
-now a small **command dispatcher** (`src/dispatch.c`/`.h`) sitting in
-front of the same proven wire-level plumbing (`src/wire.c`/`.h`, split
-out unchanged), with the original echo behavior living behind it as the
-first subsystem (`src/subsys_testharness.c`/`.h`). Every transfer on the
-wire now starts with an 8-bit command byte selecting which subsystem
-handles it -- `driver/backend.c` injects that command byte
-automatically on every `backend_write_byte()`/`backend_read_byte()`
-call, so `TRINKET.SYS` and anything that talks to it (including
-`client/drvtest.c`) get this for free without any changes on their end.
-`client/ifacetest.c`, which bypasses the driver, sends the command byte
-itself. Both currently only ever send `DISPATCH_CMD_TEST_HARNESS`. See
-`driver/NOTES.md`'s "Dispatch" section for the full design writeup.
-
-There are now two subsystems: `DISPATCH_CMD_TEST_HARNESS` (unchanged)
-and `DISPATCH_CMD_SPI` (`src/subsys_spi.c`/`.h`), a basic SPI master
-running on the H3 header's real SPI0 hardware (GPIO0-3) -- not
-SD-specific, just "configure rate/mode, move CS, run a full-duplex
-transfer, read the result back." See `subsys_spi.h`'s header comment
-for the exact request/response framing. `TRINKET.SYS`/`driver/backend.c`
-don't talk to it yet -- per its own scope note, `TRINKET.SYS` stays a
-plain byte pipe; a future block-device TSR is expected to drive
-`DISPATCH_CMD_SPI` directly (its own dispatch-byte injection, same
-pattern `backend.c` already uses for the test harness), not through
-`TRINKET.SYS`'s existing `CMD_INPUT`/`CMD_OUTPUT` semantics.
-
-**Not yet tested on hardware, and not yet built at all** -- the
-wire-level plumbing this was built from was confirmed working as a
-single file; the split into wire.c/dispatch.c/subsys_testharness.c and
-the dispatch framing itself are new and unverified on real hardware.
-`subsys_spi.c` is newer still: checked by inspection and by compiling
-against hand-written stub SDK headers (no `arm-none-eabi-gcc`/vendored
-`pico-sdk` in the environment it was written in), never built against
-the real SDK, never run against real SPI hardware. See `driver/NOTES.md`.
+The current firmware build is confirmed to compile cleanly with the real
+Pico SDK toolchain via the project build scripts. The remaining work is
+mostly validation against real media and cycle tuning, not a design gap in
+whether the subsystem model is correct.
 
 ---
 
-### When implementing the next phase:
-Reset is done, the dispatcher has two subsystems (test harness, SPI),
-and `client/sdtest.c` is a first cut at proving SD-over-SPI + FAT16
-sector I/O standalone (no driver, no TSR -- see its own header comment).
-The next real gaps, in rough order:
+### Current status of the original enhancement plan:
 
-1. **Confirm the dispatcher on real hardware** -- device side
-   (`src/dispatch.c` + the wire.c split) and host side (`backend.c`'s
-   injected command byte, `ifacetest.c`'s explicit one) both need a
-   real run before either is trusted the way reset now is. Still true,
-   unchanged by SPI's addition.
-2. **Build and hardware-test `subsys_spi.c`.** Written and only
-   compile-checked against stub SDK headers -- needs a real
-   `arm-none-eabi-gcc`/`pico-sdk` build, then a logic-analyzer check on
-   GPIO0-3 (clock rate/mode/CS timing against `SPI_OP_CONFIG`/
-   `SPI_OP_CS`/`SPI_OP_XFER`) before pointing it at any real device.
-3. **Build and hardware-test `client/sdtest.c`** against a real SD
-   card, once (2) is confirmed -- `init`/`dir`/`cat`/`readsector`/
-   `writesector`. This is where the SD-in-SPI-mode command sequencing
-   (CMD0/CMD8/ACMD41/CMD16/CMD58, block read/write) and the FAT16 BPB/
-   root-dir/cluster-chain parsing get proven against real media, before
-   any of that logic moves into a resident TSR.
-4. **The block-device TSR itself.** Per discussion: full DOS drive
-   letter via the INT 2Fh network-redirector interface (the real
-   MSCDEX mechanism), not a CONFIG.SYS block device driver -- avoids a
-   reboot on every iteration, which a `.SYS` load doesn't. Talks to
-   trinket the same way `sdtest.c` does (own raw port I/O, own
-   `DISPATCH_CMD_SPI` injection, bypassing `TRINKET.SYS`), reusing
-   `sdtest.c`'s SD/FAT16 logic once it's proven rather than
-   re-deriving it inside the TSR from scratch.
-5. Per `driver/NOTES.md`'s original scope note, any of that is meant to
-   be layered on top of the now-proven plumbing here (a new subsystem
-   module, a new `backend_*`-shaped entry point calling a new dispatch
-   command), not a rewrite of `entry.S`/`link.ld`.
+1. **High-level firmware offloading**: implemented in `src/subsys_sd.c` and
+   exercised by the `fast*` client commands.
+2. **Multi-block SD transfers (`CMD18`/`CMD25`)**: not implemented yet; the
+   firmware still loops per sector.
+3. **Media-check / VolID caching**: the firmware-side `SD_OP_CHECK_MEDIA`
+   prefilter exists; host-side media-change caching is still a separate
+   follow-up.
+4. **SPP handshake tuning**: present in C (`io_delay`, `host_reset`,
+   `raw_send_byte`, `raw_recv_byte`) in the host-side test harness; the
+   hand-written assembly unroll described in the enhancement document is
+   not present in this checkout.
+5. **Far-pointer normalization**: implemented in the legacy DOS-side path
+   in `src/TRINKET.C` via `advance_far_ptr()`, not in the firmware tree.
 
-See `docs/TESTING_CHECKLIST.md` for the ordered, concrete version of
-(1)-(3) above -- what to actually run, in what order, and what to
-compare it against. See `docs/CODEGEN_NOTES.md` if you're an LLM (or a
-human) about to add more code in this style -- it covers a comment-
-syntax footgun this repo's style makes easy to hit, plus what "checked
-by inspection" has actually meant in practice so far.
+---
+
+### Next validation steps:
+
+1. **Regression check on the SD reset bug**: confirm `fastcheck` works
+   after a host reset without clearing the card's initialized state.
+2. **Firmware hardware verification**: run the `fast*` commands against a
+   real SD card and compare behavior to the older host-side `bench` path.
+3. **Measure/compare the optimized path**: verify the firmware-offloaded
+   `fastbench` is actually faster and consistent relative to the original
+   single-block read loop.
+4. **Extend to multi-block writes/reads**: when ready, move `CMD18` and
+   `CMD25` into the SD subsystem as the next performance step.
+
+This is the active branch of the project now: use the dispatch model,
+verify the SD subsystem against real hardware, and only then add the next
+performance layer.
 
 ---
 
