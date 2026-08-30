@@ -4,7 +4,29 @@ This is the foundational c only trinket firmware testing suite.
 ---
 
 ### What this is:
-This serves as two functions, one this provides a basis for how the drivers will be written going forward, in C using linked asembly were needed.  Two this provides a test harness to asure the device works.
+This serves as two functions: first, it provides a basis for how the drivers will be written going forward in C, with linked assembly only where needed; second, it provides a test harness to validate the device behavior on real hardware.
+
+This directory is intentionally separate from the DOS driver code in `../src/` because it targets a different runtime and toolchain. The DOS driver builds under Borland C++/Turbo Assembler for a 16-bit real-mode environment, while the firmware here builds for the RP2040 Pico using CMake and the Pico SDK. The wire protocol is shared, but the build environment, target architecture, and validation flow are not.
+
+---
+
+### Firmware build scripts
+The firmware repo includes three convenience scripts at the top level:
+
+- `setup-firmware.sh`: ensures the Pico SDK, ARM toolchain, and `picotool` are available under `~/.pico-sdk` and links the installed tools into the expected locations. This is the bootstrap step if the SDK/toolchain is not already installed.
+- `build-firmware.sh`: runs the setup step, configures CMake for the firmware tree, builds the RP2040 firmware, and also builds the host-side client tools in `firmware/client` via `make`.
+- `clean-firmware.sh`: removes the generated `firmware/build` directory and runs `make clean` for the client tools.
+
+Typical flow:
+
+```bash
+./setup-firmware.sh
+./build-firmware.sh
+```
+
+The normal output is a UF2 image under `firmware/build/` plus the host-side client binaries in `firmware/client`.
+
+---
 
 ---
 

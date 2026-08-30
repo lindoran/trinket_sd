@@ -9,6 +9,17 @@ etc.) is handled by DOS itself against that BPB. This directory is the
 whole driver, three source files plus the two skeleton files DOS itself
 requires.
 
+## Firmware vs DOS driver
+
+This repo intentionally contains two separate toolchains and code paths:
+
+- The DOS driver source in `src/` is the real-mode Borland C/Turbo Assembler path that produces `TRINKET.SYS` for a DOS-era machine.
+- The Pico firmware source in `firmware/` is a separately-built CMake project for the RP2040 and uses the Raspberry Pi Pico SDK instead of the DOS toolchain.
+
+They share the same design concepts and wire protocol, but they are not built from the same toolchain, and they are not meant to be compiled together. The firmware work is treated as a separate subsystem validation target and a future host-side block-device implementation path, while the DOS code remains the actual runtime driver for the old PC environment.
+
+For the Pico-side build and validation workflow, see [firmware/README.md](./firmware/README.md).
+
 ## Where each piece came from
 The original Borland C++ repo for PPSD at: https://github.com/nilseuropa/sdpp. For this build we simply stuck to 
 a functional workflow and replaced the wire backend to handle the link requests though the new paralell read/write
@@ -141,55 +152,65 @@ PATH C:\;C:\BC31\BIN;%PATH%
 ## Functional Mockup:
 ### Key Discovery in SDMM.C vs TRINKET.C
 
-  Comparing sdpp's SDMM.C against TRINKET.C revealed why the crash at 039F:192C / 039F:193C was occurring:
+The DOS-era SD driver path had two hard real-mode issues that had to be fixed before it could boot cleanly:
 
-  1. SDMM.C explicitly defined #define NOSHIFT:
-  In Borland C 3.1 16-bit small model (-ms), performing 32-bit shifts or 32-bit multiplications on DWORD values (such as arg >> 24 or
-  lba * 512ul) forces the compiler to link external runtime assembly helper routines from cs.lib (LXURSH@ / H_LURSH and LXLSH@ /
-  H_LLSH).
-  2. The Stack Mismatch:
-  Because TRINKET.C performed 32-bit shifts in sd_cmd (arg >> 24, arg >> 16, arg >> 8) and sd_arg_for_lba (lba * 512ul), tlink pulled
-  H_LURSH (LXURSH@) into the binary right at the end of the _TEXT segment (offset 192C / 193C).
-  When sd_cmd called LXURSH@ via a near call, LXURSH@ executed its far return (RETF), corrupting the return stack frame and causing
-  execution to fall off the end of _TEXT into _DATA (hitting Exception 06 #UD at 039F:0000193C).
-  3. Stack Frame Depth:
-  TRINKET.C's spi_byte -> spi_xfer -> spi_get_result stack allocation chain created deep stack frames on every single byte transfer on
-  HEADER.ASM's 256-byte stack.
+1. **32-bit shift/multiply helpers were being pulled in from cs.lib**
+  In Borland C 3.1 16-bit small model (-ms), performing operations like
+  `arg >> 24`, `arg >> 16`, or `lba * 512ul` on DWORD values can force the
+  compiler to emit calls to external runtime helpers such as `LXURSH@`/
+  `H_LURSH` and `LXLSH@`/`H_LLSH` from `cs.lib`.
 
-  ### Changes Made to TRINKET.C
+2. **The far pointer bug**
+  `BYTE DOSFAR *p` arithmetic like `p += 512` only changes the 16-bit
+  offset portion of the far pointer. When the pointer is near the end of a
+  64KB segment, the offset wraps back to zero instead of carrying into the
+  next segment. That corrupts memory during multi-sector reads/writes.
 
-  1. Adopted SDMM.C's #define NOSHIFT byte-indexing in sd_cmd:
-  Replaced 32-bit right shifts with direct Little-Endian byte pointer access:
-    frame[1] = ((BYTE *)&arg)[3];
-    frame[2] = ((BYTE *)&arg)[2];
-    frame[3] = ((BYTE *)&arg)[1];
-    frame[4] = ((BYTE *)&arg)[0];
-    
-  2. Shift-Free LBA Address Calculation in sd_arg_for_lba:
-  Replaced 32-bit multiplication lba * 512ul with 16-bit WORD shifts:
-    static DWORD sd_arg_for_lba(DWORD lba)
-    {
-       DWORD res;
-       WORD lo, hi;
-       if (g_block_addressed) return lba;
-       lo = ((WORD *)&lba)[0];
-       hi = ((WORD *)&lba)[1];
-       ((WORD *)&res)[0] = (lo << 9);
-       ((WORD *)&res)[1] = (lo >> 7) | (hi << 9);
-       return res;
-    }
+The fix was implemented in `src/TRINKET.C` by replacing the 32-bit shift
+based code with byte-index extraction and by adding a segment-aware
+`advance_far_ptr()` helper:
 
-  3. Preserved Stack Memory:
-      • Changed local temporary arrays/buffers in spi_byte, spi_xfer, spi_op_cs, spi_op_config, and spi_get_result to static storage
-      class to prevent stack allocation churn on the 256-byte stack.
-      • Changed wait_error_high and wait_error_low loop indices from 32-bit DWORD to 16-bit UINT.
+```c
+static BYTE DOSFAR *advance_far_ptr(BYTE DOSFAR *p, WORD add_bytes)
+{
+   WORD seg = FP_SEG(p);
+   WORD off = FP_OFF(p);
+   WORD new_off = off + add_bytes;
+   WORD new_seg = seg + ((new_off < off) ? 4096 : 0);
+   return (BYTE DOSFAR *) MK_FP(new_seg, new_off);
+}
+```
 
+This is used in `disk_read()` and `disk_write()` to advance across the
+next 64KB segment instead of wrapping inside the current one.
 
-  ### Verification
+### Changes Made to TRINKET.C
 
-  • H_LURSH (LXURSH@) and H_LLSH (LXLSH@) are completely gone from bin/trinket.map.
-  • Recompiled clean with make (0 errors, 0 warnings).
-  • src/HEADER.ASM, src/DRIVER.C, src/CPRINT.C, and src/SD.C remain 100% original / unchanged.
+1. **Shift-free SD command framing**
+  Replaced 32-bit right shifts in `sd_cmd()` with direct byte access:
 
-  Additionally, the driver loads, maps to D: and then provides accsess to the sd card.
+  ```c
+  frame[1] = ((BYTE *)&arg)[3];
+  frame[2] = ((BYTE *)&arg)[2];
+  frame[3] = ((BYTE *)&arg)[1];
+  frame[4] = ((BYTE *)&arg)[0];
+  ```
+
+2. **Shift-free LBA math**
+  Replaced `lba * 512ul` with a 16-bit word-based calculation that stays in
+  small-model-safe arithmetic.
+
+3. **Stack-preserving changes**
+  - moved temporary data to static storage where the 256-byte DOS stack
+    could not absorb large transient arrays;
+  - reduced loop counters to 16-bit `UINT` where appropriate.
+
+### Verification
+
+- `H_LURSH` / `H_LLSH` are absent from the link map.
+- The DOS build compiles cleanly.
+- `src/HEADER.ASM`, `src/DRIVER.C`, `src/CPRINT.C`, and `src/SD.C` remain
+  original and unchanged.
+- The driver boots, maps to a drive letter, and provides access to the SD
+  card.
 
