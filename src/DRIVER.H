@@ -228,4 +228,7 @@ struct _media_type {    /* Generic IOCTL Get media type     */
 };
 typedef struct _media_type media_type_t;
 
+/* Reads BIOS system tick counter (INT 1Ah AH=00h), ~18.2 Hz */
+DWORD bios_ticks (void);
+
 #endif

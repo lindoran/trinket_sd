@@ -39,6 +39,8 @@
 DWORD partition_offset = 0;
 static DWORD last_known_serial = 0;
 static BOOLEAN have_serial = FALSE;
+static DWORD last_check_ticks = 0;
+#define MEDIA_CACHE_TICKS  36u   /* ~2 seconds at ~18.2 Hz */
 
 /* FatFs refers the members in the FAT structures as byte array instead of
 / structure member because the structure is not binary compatible between
@@ -186,10 +188,11 @@ int find_volume (
    bpb->hidden_sectors = 1;
 
    partition_offset = bsect;
-   /* local_buffer still holds this volume's boot sector here -- no exta
+   /* local_buffer still holds this volume's boot sector here -- no extra
     * read needed. FAT16 only (BS_VolID, offset 39). */
    last_known_serial = LD_DWORD(local_buffer + BS_VolID);
    have_serial = TRUE;
+   last_check_ticks = bios_ticks();
    return 0;
 }
 
@@ -213,24 +216,44 @@ static BOOLEAN read_volume_serial (BYTE unit, DWORD *serial)
 /* SDMediaCheck */
 /*   Returns -1/0/1 directly (M_CHANGED/M_DONT_KNOW/M_NOT_CHANGED, per   */
 /* the FreeDOS kernel's hdr/device.h) so DRIVER.C can pass it straight   */
-/* through. Not initialized / last op errored: -1 (same as before this  */
-/* change). No serial captured yet, or this read fails: 0 -- genuinely  */
-/* don't know. Serial mismatch: -1 -- real evidence of a change, not    */
-/* just uncertainty. Serial matches: 1 -- the only case actually backed */
-/* by evidence, which is what lets DOS's own free-cluster cache survive */
-/* between calls instead of being torn down every time.                 */
+/* through. Uses a two-tier approach:                                    */
+/* 1. Fast firmware pre-filter (SD_OP_CHECK_MEDIA / CMD13): answers in  */
+/*    a few bytes over LPT whether the card is present and responding.   */
+/*    If not responding, returns -1 immediately.                         */
+/* 2. Host-side VolID time-cache: if verified within MEDIA_CACHE_TICKS  */
+/*    (~2 seconds), returns 1 (M_NOT_CHANGED) without reading sector 0.  */
+/* 3. If cache expired, reads sector 0 VolID to detect physical card     */
+/*    swaps, updating the cache timestamp on match.                      */
 PUBLIC int SDMediaCheck (BYTE unit)
 {
   DWORD current_serial;
+  DWORD now;
+  DWORD elapsed;
 
   if (disk_result(unit) != RES_OK)
     return -1;
+
   if (!have_serial)
     return 0;
+
+  now = bios_ticks();
+  elapsed = now - last_check_ticks;
+
+  /* If checked recently, return M_NOT_CHANGED immediately without hitting bus */
+  if (elapsed < MEDIA_CACHE_TICKS)
+    return 1;
+
+  /* Cache expired: verify fast firmware status first, then read sector 0 serial */
+  if (disk_check_media(unit) != RES_OK)
+    return -1;
+
   if (!read_volume_serial(unit, &current_serial))
     return 0;
+
+  last_check_ticks = now;
   if (current_serial != last_known_serial)
     return -1;
+
   return 1;
 }
 

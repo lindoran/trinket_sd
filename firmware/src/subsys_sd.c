@@ -74,8 +74,17 @@ static void apply_mode(void) {
     spi_set_format(SPI_PORT, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
 }
 
+static uint8_t spi_byte(uint8_t tx_byte) {
+    uint8_t rx;
+    spi_write_read_blocking(SPI_PORT, &tx_byte, &rx, 1);
+    return rx;
+}
+
 static void cs_assert(void)   { gpio_put(PIN_SPI_CS, 0); }   // active-low
-static void cs_deassert(void) { gpio_put(PIN_SPI_CS, 1); }
+static void cs_deassert(void) {
+    gpio_put(PIN_SPI_CS, 1);
+    spi_byte(0xFFu);   // 8 dummy clocks with CS high to release DO/MISO and reset card command state machine
+}
 
 void subsys_sd_init(void) {
     spi_init(SPI_PORT, SD_INIT_BAUD_HZ);
@@ -98,7 +107,11 @@ void subsys_sd_init(void) {
 
 void subsys_sd_reset(void) {
     cs_deassert();
-    spi_set_baudrate(SPI_PORT, SD_INIT_BAUD_HZ);
+    if (sd_initialized) {
+        spi_set_baudrate(SPI_PORT, SD_NORMAL_BAUD_HZ);
+    } else {
+        spi_set_baudrate(SPI_PORT, SD_INIT_BAUD_HZ);
+    }
     apply_mode();
 
     sd_last_len = 0;
@@ -118,12 +131,6 @@ void subsys_sd_reset(void) {
 // SPI0; no parallel-link round trip anywhere in this section.
 // ---------------------------------------------------------------------
 
-static uint8_t spi_byte(uint8_t tx_byte) {
-    uint8_t rx;
-    spi_write_read_blocking(SPI_PORT, &tx_byte, &rx, 1);
-    return rx;
-}
-
 static uint8_t sd_cmd(uint8_t cmd, uint32_t arg) {
     uint8_t frame[6];
     uint8_t discard[6];
@@ -139,10 +146,12 @@ static uint8_t sd_cmd(uint8_t cmd, uint32_t arg) {
     else if (cmd == 8)  frame[5] = 0x87u;
     else                frame[5] = 0x01u;
 
+    spi_byte(0xFFu);   // 8 dummy clocks before command frame to ensure SPI sync
+
     spi_write_read_blocking(SPI_PORT, frame, discard, 6);
 
     r1 = 0xFFu;
-    for (i = 0; i < 8; i++) {
+    for (i = 0; i < 10; i++) {
         r1 = spi_byte(0xFFu);
         if (!(r1 & 0x80u)) break;
     }
@@ -231,6 +240,14 @@ static bool sd_do_init(void) {
         for (j = 0; j < 4; j++) tx[j] = 0xFFu;
         spi_write_read_blocking(SPI_PORT, tx, rx, 4);
         sd_block_addressed = (rx[0] & 0x40u) ? true : false;
+        if (!sd_block_addressed) {
+            r1 = sd_cmd(16, 512ul);
+            if (r1 != 0x00u) {
+                printf("SD: CMD16 (set blocklen 512) failed, r1=0x%02X\n", r1);
+                cs_deassert();
+                return false;
+            }
+        }
     } else {
         r1 = sd_cmd(16, 512ul);
         if (r1 != 0x00u) {
@@ -258,23 +275,17 @@ static uint32_t sd_arg_for_lba(uint32_t lba) {
     return sd_block_addressed ? lba : (lba * 512u);
 }
 
-/* CMD13 SEND_STATUS -- the cheapest legal SD command post-init, used
- * here purely as a "is anything on the other end of this SPI bus"
- * probe: SD_STATUS_OK means a valid R1 came back inside sd_cmd()'s
- * usual retry budget, SD_STATUS_ERROR means it didn't. Deliberately
- * ignores the actual status bits R1 carries (illegal command, CRC
- * error, etc.) -- for this probe's purpose those all still count as
- * "card is there and talking", which is all SD_OP_CHECK_MEDIA claims
- * to answer (see subsys_sd.h's header comment on why this can't and
- * doesn't replace the real VolID comparison). */
+/* CMD13 SEND_STATUS -- returns a 2-byte R2 response in SPI mode (R1 followed
+ * by 2nd status byte). Used here purely as a "card is present and talking" probe. */
 static bool sd_check_media(void) {
-    uint8_t r1;
+    uint8_t r1, r2;
 
     if (!sd_initialized) return false;
 
     cs_assert();
     r1 = sd_cmd(13, 0);
-    cs_deassert();
+    r2 = spi_byte(0xFFu);   // read 2nd byte of R2 response so card finishes CMD13
+    cs_deassert();          // deasserts CS and sends dummy clocks to release MISO
     return !(r1 & 0x80u);
 }
 

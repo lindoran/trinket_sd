@@ -94,23 +94,20 @@ void fmemset (void far *dst, BYTE c, WORD n)
 
 /* bios_ticks */
 /*   Reads the BIOS system clock counter (INT 1Ah AH=00h), which ticks */
-/* at ~18.2065 Hz (~54.9ms/tick).  Debug-only diagnostic use (see       */
-/* ReadBlock()'s comment below) -- coarse next to a single sector's     */
-/* real cost, fine for a running total accumulated across many calls.   */
-/* Same midnight-rollover caveat as sdtest.c's bench command's own      */
-/* bios_ticks(): if the accumulation window crosses midnight the        */
-/* running totals below go bogus.  Not guarded against here -- meant    */
-/* for a short, deliberate diagnostic session, not permanent operation. */
-unsigned long bios_ticks (void)
+/* at ~18.2065 Hz (~54.9ms/tick). Used for debug timing and host-side    */
+/* VolID media-check caching in SD.C.                                   */
+/* Uses direct word storage from CX (high) and DX (low) to avoid any    */
+/* 32-bit shift runtime helpers.                                        */
+PUBLIC DWORD bios_ticks (void)
 {
-  unsigned hi, lo;
+  DWORD res;
   _asm {
    mov   ah,0
    int   1Ah
-   mov   hi,cx
-   mov   lo,dx
+   mov   word ptr res, dx
+   mov   word ptr res+2, cx
   }
-  return (((unsigned long) hi) << 16) | lo;
+  return res;
 }
 
 /* Debug-only running totals for ReadBlock()'s own timing breakdown --   */
@@ -263,9 +260,11 @@ static BYTE far *advance_far_ptr(BYTE far *p, WORD add_bytes)
 {
    WORD seg = FP_SEG(p);
    WORD off = FP_OFF(p);
-   WORD new_off = off + add_bytes;
-   WORD new_seg = seg + ((new_off < off) ? 4096 : 0);
-   return (BYTE far *) MK_FP(new_seg, new_off);
+   seg += (off >> 4);
+   off = (off & 0x0F) + add_bytes;
+   seg += (off >> 4);
+   off &= 0x0F;
+   return (BYTE far *) MK_FP(seg, off);
 }
 
 PUBLIC void ReadBlock (rh_io_t far *rh)
@@ -477,7 +476,7 @@ PUBLIC void Initialize (rh_init_t far *rh)
   /* The version number is sneakily stored in the device header! */
   cdprintf("TRINKET.SYS - SD card via trinket parallel port bridge\n");
   cdprintf("Driver core: sdpp-main (R. Armstrong / D. Marks / ChaN / nilseuropa)\n");
-  cdprintf("SD-over-SPI backend: trinket_ifacetest wire/dispatch/SPI protocol\n");
+  cdprintf("SD backend: trinket wire/dispatch/SD protocol (firmware offloaded)\n");
   cdprintf("\n");
   /* Parse the options from the CONFIG.SYS file, if any... */
   if (!parse_options((char far *) rh->bpbtbl)) {

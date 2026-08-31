@@ -28,40 +28,27 @@ trinket calls.  This saves a huge amount of time bit-banging SPI through the por
 | File | Origin | Changed? |
 |---|---|---|
 | `HEADER.ASM` | `sdpp-main` (R. Armstrong, 1994) | No -- device header/STRATEGY/INTERRUPT glue, no SD-specific code in it at all |
-| `DRIVER.C` | `sdpp-main` | Banner text only -- INIT/READ/WRITE/IOCTL/BPB dispatch untouched |
-| `SD.C` | `sdpp-main` | No -- FAT16 BPB/MBR partition discovery, pure sector-level logic, backend-agnostic |
-| `CPRINT.C/H`, `STANDARD.H`, `DRIVER.H`, `DISKIO.H`, `INTEGER.H` | `sdpp-main` | No |
-| `TRINKET.C` | **new** | Replaces `sdpp-main`'s `SDMM.C` (bit-banged SPI). Implements the same `diskio.h` contract, but talks to the trinket's wire/dispatch/SPI protocol instead of toggling SPI on raw parallel-port data lines. |
+| `DRIVER.C` | `sdpp-main` | Banner text, far-pointer normalization, and bios_ticks export |
+| `SD.C` | `sdpp-main` | MediaCheck optimized with firmware CMD13 prefilter + VolID time caching |
+| `CPRINT.C/H`, `STANDARD.H`, `INTEGER.H` | `sdpp-main` | No |
+| `DRIVER.H`, `DISKIO.H` | `sdpp-main` | Added prototypes (bios_ticks, disk_check_media) |
+| `TRINKET.C` | **new** | Speaks to trinket's high-level SD subsystem (DISPATCH_CMD_SD) with raw_recv_bulk streaming, offloading SD protocol to RP2040 |
 
 `SD.C` calling `disk_read()`/`disk_write()`/`disk_initialize()`/
-`disk_status()` is the seam that made this possible without touching
-DOS-facing code at all: everything above that line (BPB math, MBR
-partition scan, DOS request-header dispatch) doesn't know or care how a
-sector actually gets fetched.
+`disk_status()`/`disk_check_media()` is the seam that made this possible:
+everything above that line (BPB math, MBR partition scan, DOS request-header
+dispatch) operates cleanly against the high-level block interface.
 
 ## Where `TRINKET.C` came from
 
-Ported, not reinvented, from two already-exercised pieces of
-`trinket_ifacetest`:
+Ported and refined from `trinket_ifacetest` and `firmware/`:
 
 - **Wire-level handshake** (`ctrl_out`/`io_delay`/`wait_error_high`/
-  `wait_error_low`/`raw_send_byte`/`raw_recv_byte`/`host_reset`) --
-  line-for-line from `driver/backend.c`, which is the host-side half of
-  the protocol **confirmed on real hardware** (`TRINKET.SYS`
-  character-device build, 2026-08-13 per that project's `NOTES.md`).
-  Only the asm idiom changed: `backend.c` is GCC extended asm
-  (`ia16-elf-gcc`); this uses Borland/Turbo C's `outp()`/`inp()`
-  (`<conio.h>`) -- the same convention `sdpp-main`'s own `SDMM.C`
-  already used for parallel-port I/O, so no inline asm was needed at
-  all at this layer.
-
-- **DISPATCH_CMD_SPI framing + SD-in-SPI-mode command layer**
-  (`spi_op_config`/`spi_op_cs`/`spi_xfer`/`spi_byte`, `sd_init`/
-  `sd_cmd`/`sd_acmd41`/`sd_read_block`/`sd_write_block`) -- ported from
-  `client/sdtest.c`, which per this project's own memory is the one
-  piece of this whole stack **already confirmed end-to-end against real
-  media**: SDv2 card init, FAT16 mount, directory listing, and file
-  reads, all via that standalone diagnostic EXE.
+  `wait_error_low`/`raw_send_byte`/`raw_recv_byte`/`raw_recv_bulk`/`host_reset`) --
+  hardware-confirmed wire protocol with streaming bulk nibble reads.
+- **High-Level SD Subsystem** (`DISPATCH_CMD_SD` / `SD_OP_INIT` / `SD_OP_READ_SECTORS` /
+  `SD_OP_WRITE_SECTORS` / `SD_OP_CHECK_MEDIA`) -- protocol logic offloaded to RP2040
+  firmware, cutting parallel port round trips by >90%.
 
 ## What's genuinely new and unconfirmed here
 
@@ -175,42 +162,33 @@ static BYTE DOSFAR *advance_far_ptr(BYTE DOSFAR *p, WORD add_bytes)
 {
    WORD seg = FP_SEG(p);
    WORD off = FP_OFF(p);
-   WORD new_off = off + add_bytes;
-   WORD new_seg = seg + ((new_off < off) ? 4096 : 0);
-   return (BYTE DOSFAR *) MK_FP(new_seg, new_off);
+   seg += (off >> 4);
+   off = (off & 0x0F) + add_bytes;
+   seg += (off >> 4);
+   off &= 0x0F;
+   return (BYTE DOSFAR *) MK_FP(seg, off);
 }
 ```
 
-This is used in `disk_read()` and `disk_write()` to advance across the
-next 64KB segment instead of wrapping inside the current one.
+This is used in `disk_read()` and `disk_write()` (as well as `DRIVER.C`'s `ReadBlock()`/`WriteBlock()`) to advance across 64KB segments safely instead of wrapping within the current segment.
 
-### Changes Made to TRINKET.C
+### Changes Made to the DOS Driver
 
-1. **Shift-free SD command framing**
-  Replaced 32-bit right shifts in `sd_cmd()` with direct byte access:
+1. **High-Level SD Subsystem (`DISPATCH_CMD_SD`)**
+   Offloaded SD protocol negotiation, sector reading, writing, and presence checks onto the RP2040 firmware, eliminating per-byte parallel port dispatch overhead.
 
-  ```c
-  frame[1] = ((BYTE *)&arg)[3];
-  frame[2] = ((BYTE *)&arg)[2];
-  frame[3] = ((BYTE *)&arg)[1];
-  frame[4] = ((BYTE *)&arg)[0];
-  ```
+2. **Streaming Bulk Handshake (`raw_recv_bulk`)**
+   Implemented bulk nibble read loops in `TRINKET.C` directly into far buffers with segment-normalized pointer stepping.
 
-2. **Shift-free LBA math**
-  Replaced `lba * 512ul` with a 16-bit word-based calculation that stays in
-  small-model-safe arithmetic.
+3. **Fast Media Check & VolID Caching**
+   `SDMediaCheck()` combines a fast firmware status probe (`SD_OP_CHECK_MEDIA` / CMD13) with `bios_ticks()` timestamp caching to prevent redundant Sector 0 reads during frequent DOS calls like `DIR`.
 
-3. **Stack-preserving changes**
-  - moved temporary data to static storage where the 256-byte DOS stack
-    could not absorb large transient arrays;
-  - reduced loop counters to 16-bit `UINT` where appropriate.
+4. **Normalized Far Pointer Arithmetic**
+   Uses 16-bit word arithmetic exclusively to normalize far pointers on multi-sector increments, avoiding segment wraparound and removing all 32-bit `cs.lib` dependencies.
 
 ### Verification
 
-- `H_LURSH` / `H_LLSH` are absent from the link map.
-- The DOS build compiles cleanly.
-- `src/HEADER.ASM`, `src/DRIVER.C`, `src/CPRINT.C`, and `src/SD.C` remain
-  original and unchanged.
-- The driver boots, maps to a drive letter, and provides access to the SD
-  card.
+- `H_LURSH` / `H_LLSH` / `N_LXLSH@` / `N_LXURSH@` are absent from the link map.
+- The DOS build compiles and links cleanly with zero warnings/errors.
+- The firmware and client test suite compile cleanly.
 

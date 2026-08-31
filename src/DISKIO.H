@@ -33,6 +33,7 @@ void setportbase(BYTE val);  /* set the port base */
 DSTATUS disk_initialize (BYTE pdrv);
 DSTATUS disk_status (BYTE pdrv);
 DRESULT disk_result (BYTE pdrv);
+DRESULT disk_check_media (BYTE pdrv);
 DRESULT disk_read (BYTE pdrv, BYTE DOSFAR * buff, DWORD sector, UINT count);
 DRESULT disk_write (BYTE pdrv, const BYTE DOSFAR * buff, DWORD sector, UINT count);
 DRESULT disk_ioctl (BYTE pdrv, BYTE cmd, void DOSFAR * buff);
