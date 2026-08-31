@@ -57,19 +57,35 @@
 /* ---------------------------------------------------------------------
  * Raw port I/O. No <dos.h>/<conio.h> dependency -- written directly in
  * inline asm so this file only needs a working C compiler + assembler,
- * nothing else. Standard GCC x86 inline-asm idiom: "a" pins the value
- * in AL, "Nd" allows either an 8-bit immediate or the DX register for
- * the port, which is exactly the pair of forms the 8086 IN/OUT
- * instructions support.
+ * nothing else.
+ *
+ * Forces the "d" (DX-only) alternative rather than the more standard
+ * GCC x86 "Nd" (8-bit-immediate-or-DX) idiom, even though every actual
+ * call site here passes a runtime value that "Nd" would resolve to DX
+ * anyway -- confirmed via disassembly this generates the exact same
+ * `mov dx,[port]; out dx,al` either way at this file's current -O0
+ * build, so this is a zero-behavior-change defensive fix, not a bug
+ * fix for anything currently broken here. The reason: sdtest.c hit
+ * real `ia16-elf-gcc -O2` assembler errors ("operand type mismatch")
+ * from this exact "Nd" form once outportb/inportb actually got inlined
+ * at every call site under -O2 -- this toolchain's constraint solver
+ * apparently doesn't reliably resolve "Nd" once the asm block is
+ * duplicated across many inlined call sites, only when it stays a
+ * real, separate, un-inlined function body (which is all "Nd" has ever
+ * been asked to do here, since this file has no -O2 in its Makefile
+ * line). If -O2 (or anything else that would inline these) is ever
+ * added to this target, this form is required to avoid the same
+ * failure -- see firmware/client/sdtest.c's own copy of this comment
+ * for the full story.
  * ------------------------------------------------------------------- */
 
 static inline void outportb(unsigned port, unsigned char value) {
-    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+    __asm__ volatile ("outb %%al, %%dx" : : "a"(value), "d"(port));
 }
 
 static inline unsigned char inportb(unsigned port) {
     unsigned char ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    __asm__ volatile ("inb %%dx, %%al" : "=a"(ret) : "d"(port));
     return ret;
 }
 

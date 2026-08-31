@@ -50,6 +50,23 @@
  * ifacetest.c's already-hardware-confirmed transport before trusting
  * any of the SD-specific logic.
  *
+ * fastinit/fastread/fastwrite/fastbench (Section 2b/5c) ARE built and
+ * hardware-confirmed as of this note -- fastbench measured ~17ms/block
+ * against bench's ~23ms/block on real hardware, see subsys_sd.h and
+ * this project's own notes for that comparison and why the gap isn't
+ * bigger. raw_recv_bulk() (Section 1, ENHANCEMENTS.md point 4) and the
+ * Makefile's -O2 for this target are NOT yet re-tested against that
+ * same fastbench number -- written the same "checked by inspection,
+ * matches the pre-existing per-byte logic exactly" way the rest of
+ * this paragraph describes, still needs a real rebuild + rerun to see
+ * whether either actually moves it. Also not yet re-tested since the
+ * g_tx_buf/g_cmd_buf stack-to-static conversion below (real fix for a
+ * real stack-overflow-class bug hit on hardware, same pattern as
+ * TRINKET.C's own first bug -- see this project's notes): that
+ * conversion and this file's point-4 work don't touch the same
+ * functions, but both need a fresh build+run before either is trusted
+ * together with the other.
+ *
  * Usage:
  *   SDTEST.EXE <command> [args] [/P=xxxx]
  *     /P=xxxx   LPT base I/O port, hex, no prefix (default 378),
@@ -101,23 +118,40 @@
 /* ===================================================================
  * Section 1: raw port I/O + wire-level handshakes.
  *
- * Line-for-line the same idiom as client/ifacetest.c's equivalent
- * section (outportb/inportb, ctrl bit meanings, io_delay, host_reset,
- * wait_error_high/low, host_select_direction) -- see that file's header
- * comment for the doc-section references these implement. Duplicated
- * rather than shared because there is still no shared header between
- * ia16-elf-gcc translation units in this project (see dispatch.h's
- * namespace note) and this file has no dependency on ifacetest.c beyond
- * "happens to need the same primitives."
+ * Same idiom as client/ifacetest.c's equivalent section (ctrl bit
+ * meanings, io_delay, host_reset, wait_error_high/low,
+ * host_select_direction) -- see that file's header comment for the
+ * doc-section references these implement. Duplicated rather than
+ * shared because there is still no shared header between ia16-elf-gcc
+ * translation units in this project (see dispatch.h's namespace note)
+ * and this file has no dependency on ifacetest.c beyond "happens to
+ * need the same primitives."
+ *
+ * outportb/inportb are the one deliberate exception, not line-for-line
+ * with ifacetest.c: this file hit real `ia16-elf-gcc -O2` assembler
+ * errors ("operand type mismatch for `in'/`out'") from ifacetest.c's
+ * original "Nd" (immediate-or-DX) constraint form once outportb/
+ * inportb actually got inlined at every call site -- confirmed via
+ * disassembly that ifacetest.c's own "Nd" form only ever compiles
+ * clean because it's built without -O2, so outportb/inportb stay real,
+ * separate, un-inlined `call`s there; the constraint is never actually
+ * resolved in an inlined context on this toolchain. This file forces
+ * the "d" (DX-only) alternative instead, confirmed via disassembly to
+ * still generate real outb/inb against the real port value, with
+ * io_delay()'s four dummy reads and every polling loop intact -- see
+ * this project's own notes for the disassembly that confirmed this.
+ * ifacetest.c's "Nd" form is fine as-is only because it's never built
+ * with -O2 or anything else that would inline it; if that ever
+ * changes, it needs this same fix first.
  * =================================================================== */
 
 static inline void outportb(unsigned port, unsigned char value) {
-    __asm__ volatile ("outb %0, %1" : : "a"(value), "Nd"(port));
+    __asm__ volatile ("outb %%al, %%dx" : : "a"(value), "d"(port));
 }
 
 static inline unsigned char inportb(unsigned port) {
     unsigned char ret;
-    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    __asm__ volatile ("inb %%dx, %%al" : "=a"(ret) : "d"(port));
     return ret;
 }
 
@@ -150,9 +184,23 @@ static void ctrl_out(unsigned char value) {
     outportb(base_port + REG_CONTROL, value);
 }
 
+/* Number of dummy port 0x80 reads per io_delay() call. 4 is this
+ * project's long-standing default (see ifacetest.c/backend.c) and
+ * hasn't been shown to be more than needed on any hardware this has
+ * actually run on -- it stays the default here. ENHANCEMENTS.md point
+ * 4 suggests this is worth trying lower (1-2) on faster machines,
+ * since raw_recv_bulk()'s per-byte cost includes two of these calls;
+ * that's a real, cheap experiment to run against actual hardware (try
+ * IO_DELAY_ITERS 2 or 1, rerun fastbench, watch for actual handshake
+ * failures, not just a faster number) -- not something to guess at
+ * from here without a way to see whether a given machine's parallel
+ * port and this firmware's own polling loop still settle correctly at
+ * a shorter delay. */
+#define IO_DELAY_ITERS  4
+
 static void io_delay(void) {
     int i;
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i < IO_DELAY_ITERS; i++) {
         inportb(0x80);
     }
 }
@@ -238,6 +286,68 @@ static int raw_recv_byte(unsigned char *out) {
     if (wait_error_low()) return 1;
 
     *out = (unsigned char)((lo >> 4) | hi);
+    return 0;
+}
+
+/* Bulk nibble read -- reads `count` bytes via the exact same per-byte
+ * protocol as raw_recv_byte() above (copied verbatim: same 2 nibbles,
+ * same full Init/Error handshake each, same bit patterns), as ONE
+ * loop instead of `count` separate function calls. This is
+ * ENHANCEMENTS.md point 4's "unrolled bulk nibble stream", in plain C
+ * rather than hand-written inline assembly -- deliberately: there is
+ * still no path to real ia16-elf-gcc/DOS/RP2040 hardware in the
+ * environment this was written in (see this file's UNTESTED header
+ * note), and hand-rolled asm that's subtly wrong in some register-
+ * clobbering way is both easier to get wrong and harder to catch by
+ * inspection than equivalent C -- the g_tx_buf/g_cmd_buf stack-to-
+ * static fix elsewhere in this file is exactly this project's own
+ * evidence that this file's logic needs a real build (and real
+ * hardware) to fully trust, and asm raises that bar further, not
+ * lowers it. Try adding -O2 to the Makefile's CFLAGS before reaching
+ * for asm at all: this file's outportb/inportb/io_delay/ctrl_out are
+ * all declared `static inline`, which plain GCC only honors above
+ * -O0 -- at an un-optimized build, EVERY one of those is a real
+ * CALL/RET, not the register-resident couple-of-instructions
+ * ENHANCEMENTS.md's point 4 is describing. -O2 may already close most
+ * of the gap this function is chasing, with none of hand-written
+ * asm's risk; if a real build shows it doesn't, hand-written asm is a
+ * reasonable next experiment -- but run that against real hardware,
+ * not from here.
+ *
+ * buf may be NULL (discard -- see cmd_fastbench()'s use via
+ * sd2_get_result()'s buf==NULL/bufcap==0 path): every byte is still
+ * read off the wire either way, since the protocol has to stay in
+ * lockstep regardless of whether the caller wants the value. Returns
+ * 0 on success, 1 on the first handshake failure -- some prefix of
+ * buf[] (if not NULL) may already be filled in that case, same
+ * partial-progress behavior calling raw_recv_byte() in a loop would
+ * have. */
+static int raw_recv_bulk(unsigned char *buf, unsigned count) {
+    unsigned char status, lo, hi, val;
+    unsigned i;
+
+    for (i = 0; i < count; i++) {
+        ctrl_out((unsigned char)((ctrl_shadow & ~0x01u) | CTRL_STROBE_SELECT_LOW));
+        io_delay();
+        ctrl_out((unsigned char)(ctrl_shadow | CTRL_INIT_RAISED));
+        if (wait_error_high()) return 1;
+        status = inportb(base_port + REG_STATUS);
+        lo = (unsigned char)(status & 0xF0u);
+        ctrl_out((unsigned char)(ctrl_shadow & ~CTRL_INIT_RAISED));
+        if (wait_error_low()) return 1;
+
+        ctrl_out((unsigned char)((ctrl_shadow & ~0x01u) | CTRL_STROBE_SELECT_HIGH));
+        io_delay();
+        ctrl_out((unsigned char)(ctrl_shadow | CTRL_INIT_RAISED));
+        if (wait_error_high()) return 1;
+        status = inportb(base_port + REG_STATUS);
+        hi = (unsigned char)(status & 0xF0u);
+        ctrl_out((unsigned char)(ctrl_shadow & ~CTRL_INIT_RAISED));
+        if (wait_error_low()) return 1;
+
+        val = (unsigned char)((lo >> 4) | hi);
+        if (buf != NULL) buf[i] = val;
+    }
     return 0;
 }
 
@@ -451,23 +561,41 @@ static unsigned char spi_byte(unsigned char tx_byte) {
 static int sd2_get_result(unsigned char *out_status, int *out_is_v2,
                            int *out_block_addressed, unsigned char *buf,
                            unsigned bufcap, unsigned *out_len) {
-    unsigned char status, is_v2, block_addressed, len_lo, len_hi, b;
+    unsigned char status, is_v2, block_addressed, len_lo, len_hi;
+    unsigned char hdr[5];
     unsigned len, i;
 
     host_select_direction(1);
     if (raw_send_byte(DISPATCH_CMD_SD)) return 1;
     host_select_direction(0);
 
-    if (raw_recv_byte(&status)) return 1;
-    if (raw_recv_byte(&is_v2)) return 1;
-    if (raw_recv_byte(&block_addressed)) return 1;
-    if (raw_recv_byte(&len_lo)) return 1;
-    if (raw_recv_byte(&len_hi)) return 1;
+    for (i = 0; i < 5; i++)
+        if (raw_recv_byte(hdr + i)) return 1;
+    status = hdr[0]; is_v2 = hdr[1]; block_addressed = hdr[2];
+    len_lo = hdr[3]; len_hi = hdr[4];
     len = (unsigned)len_lo | ((unsigned)len_hi << 8);
 
-    for (i = 0; i < len; i++) {
-        if (raw_recv_byte(&b)) return 1;
-        if (buf != NULL && i < bufcap) buf[i] = b;
+    /* Bulk-read the payload via raw_recv_bulk() (see that function's
+     * own comment) instead of one raw_recv_byte() call per byte.
+     * Three cases, so a bufcap smaller than len (cmd_fastread()'s
+     * fixed 512-byte g_cmd_buf against a multi-sector len, in
+     * particular) still only costs two bulk calls, not a fallback to
+     * per-byte:
+     *   - buf==NULL or bufcap==0: nothing to keep, one bulk call
+     *     discards all `len` bytes (cmd_fastbench()'s case, and the
+     *     one that actually matters for re-measuring against the
+     *     existing bench/fastbench numbers).
+     *   - bufcap >= len: one bulk call captures everything.
+     *   - 0 < bufcap < len: one bulk call captures the first bufcap
+     *     bytes, a second discards the rest -- still drains the full
+     *     response so the wire protocol stays in lockstep. */
+    if (buf == NULL || bufcap == 0) {
+        if (raw_recv_bulk(NULL, len)) return 1;
+    } else if (bufcap >= len) {
+        if (raw_recv_bulk(buf, len)) return 1;
+    } else {
+        if (raw_recv_bulk(buf, bufcap)) return 1;
+        if (raw_recv_bulk(NULL, len - bufcap)) return 1;
     }
 
     *out_status = status;
