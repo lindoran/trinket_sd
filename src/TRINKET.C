@@ -187,11 +187,27 @@ static int raw_recv_byte(BYTE *out)
  * protocol as raw_recv_byte() in ONE tight loop without per-byte function
  * call overhead (ENHANCEMENTS.md point 4).
  * buf is a far pointer (BYTE DOSFAR *), or 0 to discard.
- * Returns 0 on success, 1 on timeout/failure. */
+ *
+ * FIX (see this project's own established point-5 far-pointer-wrap
+ * bug and its fix elsewhere in this file): the original version of
+ * this function wrote via `buf[i]`, which for a `far` pointer compiles
+ * to a plain 16-bit offset add with no segment carry (confirmed via
+ * -S: `les bx,[buf]; add bx,si; mov es:[bx],al` -- BX is the offset
+ * only, ES never adjusted). A 512-byte sector read into a caller
+ * buffer positioned within the last 511 bytes of its 64K segment would
+ * silently wrap and write to the wrong physical address -- this is
+ * reachable on every ordinary single-sector disk_read(), not just a
+ * multi-sector edge case, since it depends only on where DOS happened
+ * to place the destination buffer. Walking a local far pointer forward
+ * with advance_far_ptr(p, 1) instead of indexing buf[i] fixes this the
+ * same way every other far-pointer walk in this file already does. */
+static BYTE DOSFAR *advance_far_ptr(BYTE DOSFAR *p, WORD add_bytes);
+
 static int raw_recv_bulk(BYTE DOSFAR *buf, UINT count)
 {
    BYTE status, lo, hi, val;
    UINT i;
+   BYTE DOSFAR *p = buf;
 
    for (i = 0; i < count; i++) {
       ctrl_out((BYTE)((ctrl_shadow & ~0x01u) | CTRL_STROBE_SELECT_LOW));
@@ -213,7 +229,10 @@ static int raw_recv_bulk(BYTE DOSFAR *buf, UINT count)
       if (wait_error_low()) return 1;
 
       val = (BYTE)((lo >> 4) | hi);
-      if (buf != 0) buf[i] = val;
+      if (buf != 0) {
+         *p = val;
+         p = advance_far_ptr(p, 1);
+      }
    }
    return 0;
 }
@@ -334,7 +353,13 @@ static int sd2_read_sectors(DWORD lba, UINT count, BYTE DOSFAR *buf)
 }
 
 /* SD_OP_WRITE_SECTORS -- writes `count` consecutive sectors starting at
- * `lba` from `buf` in ONE dispatch round trip. */
+ * `lba` from `buf` in ONE dispatch round trip.
+ *
+ * FIX: same far-pointer-wrap bug as raw_recv_bulk() above, same fix --
+ * the original `p[i]` here has the identical `add bx,si`-with-no-
+ * segment-carry problem, just reading from the wrong address instead
+ * of writing to it. Walks p with advance_far_ptr(p, 1) per byte now,
+ * not per sector. */
 static int sd2_write_sectors(DWORD lba, UINT count, const BYTE DOSFAR *buf)
 {
    BYTE status;
@@ -355,9 +380,9 @@ static int sd2_write_sectors(DWORD lba, UINT count, const BYTE DOSFAR *buf)
    p = buf;
    for (s = 0; s < count; s++) {
       for (i = 0; i < 512; i++) {
-         if (raw_send_byte(p[i])) return 1;
+         if (raw_send_byte(*p)) return 1;
+         p = (const BYTE DOSFAR *) advance_far_ptr((BYTE DOSFAR *) p, 1);
       }
-      p = (const BYTE DOSFAR *) advance_far_ptr((BYTE DOSFAR *) p, 512);
    }
 
    if (sd2_get_result(&status, 0, 0, 0, 0, 0)) return 1;
