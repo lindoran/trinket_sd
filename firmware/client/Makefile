@@ -4,10 +4,7 @@
 CC = ia16-elf-gcc
 CFLAGS = -mcmodel=small -Wall -Wextra
 
-all: DRVTEST.EXE IFTEST.EXE SDTEST.EXE
-
-DRVTEST.EXE: drvtest.c
-	$(CC) $(CFLAGS) -o $@ $<
+all: IFTEST.EXE SDTEST.EXE
 
 IFTEST.EXE: ifacetest.c
 	$(CC) $(CFLAGS) -o $@ $<
@@ -24,6 +21,6 @@ SDTEST.EXE: sdtest.c
 	$(CC) $(CFLAGS) -O2 -o $@ $<
 
 clean: 
-	rm -f DRVTEST.EXE IFTEST.EXE SDTEST.EXE	
+	rm -f IFTEST.EXE SDTEST.EXE
  
 .PHONY: all clean
