@@ -103,7 +103,9 @@
  *       sectors via `count` sequential CMD24s.
  *
  *     SD_OP_CHECK_MEDIA (0x04): no further bytes. Issues one CMD13
- *       (SEND_STATUS) and reports whether a valid R1 came back within
+ *       (SEND_STATUS -- a 2-byte R2 response in SPI mode; both bytes are
+ *       read off the SD bus before CS is released, even though only the
+ *       first is inspected) and reports whether a valid R1 came back within
  *       the same short retry budget sd_cmd() always uses -- SD_STATUS_OK
  *       means the card answered, SD_STATUS_ERROR means it didn't (or no
  *       SD_OP_INIT has succeeded yet this session, checked first without

@@ -80,11 +80,24 @@ static BYTE far* normalize_far_ptr(BYTE far *p, WORD add_bytes) {
 
 The project has moved the main SD logic onto the RP2040 firmware and migrated the high-level SD subsystem, fast streaming handshakes, media check caching, and far-pointer normalization into both the test suite (`sdtest.c`) and the DOS driver (`TRINKET.SYS` in `src/`):
 
-- **1. High-Level Firmware Offloading**: implemented in `firmware/src/subsys_sd.*`, validated by `firmware/client/sdtest.c`, and fully migrated to the DOS driver in `src/TRINKET.C` (`DISPATCH_CMD_SD` with `SD_OP_INIT`, `SD_OP_READ_SECTORS`, `SD_OP_WRITE_SECTORS`, `SD_OP_CHECK_MEDIA`).
-- **2. Multi-Block Reads/Writes (`CMD18` / `CMD25`)**: not implemented in the current firmware; the implementation still loops sector-by-sector internally on the RP2040.
+- **1. High-Level Firmware Offloading**: implemented in `firmware/src/subsys_sd.*`, validated by `firmware/client/sdtest.c`, and fully migrated to the DOS driver in `src/TRINKET.C` (`DISPATCH_CMD_SD` with `SD_OP_INIT`, `SD_OP_READ_SECTORS`, `SD_OP_WRITE_SECTORS`, `SD_OP_CHECK_MEDIA`). Measured on real hardware: a real but modest ~26% faster than the old per-sector path (not the ~90% estimated above) -- the per-byte wire handshake, not SD-command framing, turned out to be the dominant cost; see README.md's "Where things stand".
+- **2. Multi-Block Reads/Writes (`CMD18` / `CMD25`)**: not implemented in the current firmware; the implementation still loops sector-by-sector internally on the RP2040. **On hold** -- see "What's on hold and why" below.
 - **3. Media Check / VolID Caching**: fully implemented. Firmware provides fast `SD_OP_CHECK_MEDIA` (CMD13), and `src/SD.C` (`SDMediaCheck`) uses this as a pre-filter along with `bios_ticks()` timestamp caching to avoid reading sector 0 on repetitive checks.
 - **4. SPP Wire Protocol Tuning**: high-speed streaming `raw_recv_bulk()` implemented in both `firmware/client/sdtest.c` and `src/TRINKET.C`, streaming 512-byte sectors with minimal loop overhead and far-pointer normalization.
 - **5. Far Pointer Normalization**: implemented across the DOS driver (`src/TRINKET.C` and `src/DRIVER.C` via `advance_far_ptr()`). Normalizes segment and offset with 16-bit safe arithmetic to prevent 64KB boundary wraparound without external `cs.lib` 32-bit shift dependencies.
+
+## What's on hold and why
+
+Point 2 (multi-block `CMD18`/`CMD25`) and any further point-4-style
+wire-protocol work (a real burst-transfer redesign, batching the
+acknowledgment every N bytes instead of every byte) are **intentionally
+paused, not abandoned**, pending the project's next planned addition:
+audio, over the same shared parallel-port link (see README.md's "Where
+this is headed"). Both would touch the same dispatch/wire-protocol layer
+a sound-capable second device will also need a say in -- redesigning it
+once, informed by both storage's and sound's actual requirements, avoids
+having to revisit or partially undo a storage-only redesign once sound's
+needs are known.
 
 ## Summary of Enhancements
 

@@ -1,3 +1,18 @@
+# TRINKET SD (what is it?)
+This is a one stop shop SPP based sound and storage option for dos era
+gear that could benifit from it existing.   This will let you bring up 
+a mass storage device, play sounds and maybe more.. all from a standard
+lpt port.
+
+Why? specifically there's a need because projects like the much simpler
+sdpp project exist but are flawed.  Having a very standard way to 
+connect a modern serial device to a paralell port without having to 
+worry if the card is going to be compatible, or if the port wiring is 
+supported by the tranciever on the sd card module.   And while this 
+isn't fast -- its a fair bit faster for bakcking up data to a card, 
+as the computer no longer has to worry about i2c timing, it just sends 
+bytes down the wire.
+
 # TRINKET.SYS
 
 One concrete `CONFIG.SYS DEVICE=` block-device driver for a DOS-era SD
@@ -5,84 +20,166 @@ card reader built on the trinket parallel-port bridge. No TSR, no INT
 2Fh redirector, no separate hardware-layer driver + MSCDEX-analog pair
 -- DOS sees a normal block device with a BPB, the same way it sees a
 floppy or hard disk, and every FAT16 filesystem operation (dir, copy,
-etc.) is handled by DOS itself against that BPB. This directory is the
-whole driver, three source files plus the two skeleton files DOS itself
-requires.
+etc.) is handled by DOS itself against that BPB.
 
-## Firmware vs DOS driver
+**Status**: working end to end on real hardware -- `TRINKET.SYS` boots
+DOS from an SD card and has run Wolfenstein 3D from it, reported by feel
+as no slower than a parallel-port Zip drive. See "Where things stand"
+below for what that does and doesn't cover, and "Where this is headed"
+for what's next -- notably, further storage-side optimization is
+intentionally paused (see that section).
 
-This repo intentionally contains two separate toolchains and code paths:
+## Repo layout
 
-- The DOS driver source in `src/` is the real-mode Borland C/Turbo Assembler path that produces `TRINKET.SYS` for a DOS-era machine.
-- The Pico firmware source in `firmware/` is a separately-built CMake project for the RP2040 and uses the Raspberry Pi Pico SDK instead of the DOS toolchain.
+Two separate toolchains and code paths live here, sharing a wire
+protocol but never built together:
 
-They share the same design concepts and wire protocol, but they are not built from the same toolchain, and they are not meant to be compiled together. The firmware work is treated as a separate subsystem validation target and a future host-side block-device implementation path, while the DOS code remains the actual runtime driver for the old PC environment.
+- **`src/`** -- the real-mode Borland C++ 3.1/Turbo Assembler driver
+  that produces `TRINKET.SYS` for a DOS-era machine.
+- **`firmware/`** -- the RP2040 side: a CMake/Pico-SDK project
+  (`firmware/src/`) plus DOS-side diagnostic client tools built with
+  ia16-elf-gcc (`firmware/client/`, e.g. `sdtest.c`'s `fastinit`/
+  `fastread`/`fastbench`/`fastcheck` commands -- the standalone way to
+  exercise the RP2040 side without the driver in the loop at all).
 
-For the Pico-side build and validation workflow, see [firmware/README.md](./firmware/README.md).
+See [firmware/README.md](./firmware/README.md) for the firmware side in
+its own detail, and **[TOOLCHAIN.md](./TOOLCHAIN.md) for the full,
+current build-environment story** -- what each toolchain actually needs,
+what reproduces in a fresh sandbox and what doesn't, and two real
+hazards specific to compiling this driver that a clean build alone won't
+catch. Both are referenced throughout this file rather than duplicated.
+
+## Building
+
+```
+./build.sh            # builds firmware + client tools + driver, -> dist/
+./clean-all.sh
+./check-toolchain.sh  # check to see if the build depends exist.
+
+```
+
+The same build chain is available through the top-level `Makefile`:
+
+```
+make                  # build firmware, client tools, and DOS driver
+make package          # build everything and create .tar.gz, .7z, and .zip archives
+make toolchain        # check all build/package dependencies
+make firmware         # build firmware and client tools
+make client           # build only the DOS client tools
+make driver           # build only the DOS driver
+make setup            # install or link firmware build dependencies
+make clean            # remove all generated artifacts
+make help             # list all targets
+```
+
+Or individually: `build-firmware.sh`/`clean-firmware.sh` (RP2040 +
+client tools) and `build-driver.sh`/`clean-driver.sh` (the DOS driver,
+via dosbox + the vendored Borland toolchain -- no dosemu2 needed). All
+four leave their output in `dist/`.
+
+**One thing you must supply yourself**: `legacy/bc31/` (Borland C++
+3.1) is gitignored on purpose -- it's proprietary software this repo
+has no right to redistribute, so a plain clone/zip export will never
+include it. `build-driver.sh` fails with a clear message explaining
+this if it's missing; see TOOLCHAIN.md for exactly what needs to be
+there.
 
 ## Where each piece came from
-The original Borland C++ repo for PPSD at: https://github.com/nilseuropa/sdpp. For this build we simply stuck to 
-a functional workflow and replaced the wire backend to handle the link requests though the new paralell read/write
-trinket calls.  This saves a huge amount of time bit-banging SPI through the port.
+
+The original Borland C++ repo for PPSD:
+https://github.com/nilseuropa/sdpp. This project kept its functional
+workflow (DOS-side FAT16/BPB/MBR logic, `diskio.h` contract) and
+replaced the storage backend to talk to the trinket link instead of
+bit-banging SPI directly on parallel-port data lines.
 
 | File | Origin | Changed? |
 |---|---|---|
-| `HEADER.ASM` | `sdpp-main` (R. Armstrong, 1994) | No -- device header/STRATEGY/INTERRUPT glue, no SD-specific code in it at all |
-| `DRIVER.C` | `sdpp-main` | Banner text, far-pointer normalization, and bios_ticks export |
-| `SD.C` | `sdpp-main` | MediaCheck optimized with firmware CMD13 prefilter + VolID time caching |
+| `HEADER.ASM` | `sdpp-main` (R. Armstrong, 1994) | No -- device header/STRATEGY/INTERRUPT glue, no SD-specific code |
+| `DRIVER.C` | `sdpp-main` | Banner text; added `bios_ticks()` and its own `advance_far_ptr()` for Debug-mode timing and far-pointer safety in `ReadBlock()`/`WriteBlock()`; INIT/READ/WRITE/IOCTL/BPB dispatch shape otherwise untouched |
+| `SD.C` | `sdpp-main` | `SDMediaCheck()` now does a real VolID comparison, a firmware-side `CHECK_MEDIA` pre-filter, and a short time-based debounce (see below); FAT16 BPB/MBR partition discovery itself is unchanged |
 | `CPRINT.C/H`, `STANDARD.H`, `INTEGER.H` | `sdpp-main` | No |
-| `DRIVER.H`, `DISKIO.H` | `sdpp-main` | Added prototypes (bios_ticks, disk_check_media) |
-| `TRINKET.C` | **new** | Speaks to trinket's high-level SD subsystem (DISPATCH_CMD_SD) with raw_recv_bulk streaming, offloading SD protocol to RP2040 |
+| `DRIVER.H`, `DISKIO.H` | `sdpp-main` | One new prototype each (`bios_ticks()`, `disk_check_media()`) |
+| `TRINKET.C` | **new** | Replaces `sdpp-main`'s `SDMM.C` (bit-banged SPI). Speaks the trinket's high-level `DISPATCH_CMD_SD` protocol -- sends a sector number and a count, gets sector data back. Doesn't itself know about CMD17/CMD24/R1/data-tokens/byte-vs-block-addressing any more; that all runs on the RP2040 now (`firmware/src/subsys_sd.c`) |
 
 `SD.C` calling `disk_read()`/`disk_write()`/`disk_initialize()`/
-`disk_status()`/`disk_check_media()` is the seam that made this possible:
-everything above that line (BPB math, MBR partition scan, DOS request-header
-dispatch) operates cleanly against the high-level block interface.
+`disk_status()`/`disk_check_media()` is the seam that made this
+possible without touching DOS-facing code: everything above that line
+(BPB math, MBR partition scan, DOS request-header dispatch) doesn't
+know or care how a sector actually gets fetched.
 
-## Where `TRINKET.C` came from
-
-Ported and refined from `trinket_ifacetest` and `firmware/`:
+`TRINKET.C` itself was ported, not reinvented, in two pieces:
 
 - **Wire-level handshake** (`ctrl_out`/`io_delay`/`wait_error_high`/
-  `wait_error_low`/`raw_send_byte`/`raw_recv_byte`/`raw_recv_bulk`/`host_reset`) --
-  hardware-confirmed wire protocol with streaming bulk nibble reads.
-- **High-Level SD Subsystem** (`DISPATCH_CMD_SD` / `SD_OP_INIT` / `SD_OP_READ_SECTORS` /
-  `SD_OP_WRITE_SECTORS` / `SD_OP_CHECK_MEDIA`) -- protocol logic offloaded to RP2040
-  firmware, cutting parallel port round trips by >90%.
+  `wait_error_low`/`raw_send_byte`/`raw_recv_byte`/`host_reset`, plus
+  `raw_recv_bulk_far`/`raw_send_bulk_far` for far-pointer-safe
+  multi-byte transfers) -- confirmed on real hardware; uses Borland/
+  Turbo C's `outp()`/`inp()` (`<conio.h>`) rather than inline asm, the
+  same convention `sdpp-main`'s own `SDMM.C` already used.
+- **`DISPATCH_CMD_SD` client layer** (`sd_op_init`/`sd_op_read_sectors`/
+  `sd_op_write_sectors`/`sd_op_check_media`) -- ported from
+  `firmware/client/sdtest.c`'s own `sd2_*` client, itself confirmed via
+  the standalone `fastinit`/`fastread`/`fastwrite`/`fastbench`/
+  `fastcheck` diagnostic commands before this driver ever used it.
 
-## What's genuinely new and unconfirmed here
+## Where things stand
 
-- **The dispatch/SPI subsystem itself, device-side** (`subsys_spi.c` on
-  the trinket firmware). Per `trinket_ifacetest/README.md`: written and
-  only compile-checked against stub SDK headers, never built with a
-  real `arm-none-eabi-gcc`/`pico-sdk`, never run against real SPI
-  hardware.
-- **Driving all of this from inside a resident, DOS-request-triggered
-  `.SYS` module** rather than a human running one `SDTEST.EXE` command
-  at a time. The logic is identical to `sdtest.c`; what's untested is
-  whether it behaves the same when `disk_read()`/`disk_write()` call it
-  back-to-back across many DOS-generated sector requests, in the
-  segment/stack environment a real device driver runs in (see
-  `sdpp-main`'s own HEADER.ASM comments on the SMALL-model CS/DS
-  concerns that motivated most of its assembly layer).
-- **The Borland-C port of the wire/SPI layer itself.** The logic is a
-  direct port of hardware-confirmed (wire) and media-confirmed (SD
-  command layer) C, but it has not itself been compiled with `bcc`/
-  `tasm` or run on real hardware yet -- see "Suggested bring-up order"
-  below for how to isolate a problem if one shows up.
+**Confirmed on real hardware, end to end**: card init, sector read/write,
+media check, and DOS booting + running software (Wolf3D) from the card
+through this exact driver -- not just isolated benchmarks.
 
-## What was deliberately dropped from `sdpp-main`
+**Deliberately not implemented**:
+- **Card-detect** (`/k`). The trinket's GPIO map has no card-detect
+  line -- `sdpp-main`'s CD-on-BUSY wiring doesn't apply here. `/k` is
+  accepted on the `CONFIG.SYS` line and silently ignored.
+- **Multi-block SD commands** (`CMD18`/`CMD25`). `disk_read()`/
+  `disk_write()` already batch a whole multi-sector request into one
+  `DISPATCH_CMD_SD` round trip, but the RP2040 firmware still loops
+  single-block `CMD17`/`CMD24` internally rather than issuing a real
+  multi-block command. On hold -- see "Where this is headed" below.
 
-- **Card-detect** (`/k`, `CDDETECT()`). The trinket's GPIO map has no
-  line dedicated to SD card-detect over this link -- `sdpp-main`'s
-  CD-on-BUSY wiring doesn't apply. `/k` is accepted on the
-  `CONFIG.SYS` line and silently ignored.
-- **Multi-block read/write** (`CMD18`/`CMD25`). `sdtest.c` never had
-  it either -- `disk_read()`/`disk_write()` here just loop the
-  single-block `CMD17`/`CMD24` commands sector by sector. Correct, not
-  fast: per `sdtest.c`'s own header comment, every SPI byte costs two
-  full dispatch round trips over the parallel link, so large transfers
-  will be slow until/unless that's revisited.
+**Worth knowing about, not bugs**:
+- `SDMediaCheck()`'s time-based debounce skips even the cheap
+  `CHECK_MEDIA` probe if checked within the last ~2 seconds -- a real,
+  if narrow, window where a physical card swap wouldn't be detected.
+  Probably fine given a swap takes a human several seconds minimum, but
+  it's a deliberate trade against the driver's original always-verify
+  guarantee, not a free win.
+- The wire protocol's own per-byte handshake, not SD-command overhead,
+  dominates the remaining per-block time: moving SD command sequencing
+  onto the RP2040 (this section's whole `DISPATCH_CMD_SD` migration)
+  measured as a real but modest ~26% faster than the old per-sector
+  path, not the dramatic win a naive read of the numbers might suggest.
+  The lever that would actually move that floor is a wire-protocol-level
+  redesign (batch the acknowledgment every N bytes instead of every
+  byte) -- see below for why that's paused too.
+
+## Where this is headed
+
+The next planned addition is **audio** -- likely starting with something
+Disney-Sound-Source-shaped (a raw PCM stream, no synthesis) through a
+PCM5102 I2S DAC on the RP2040's spare GPIOs, with the RP2040's PIO+DMA
+generating the I2S bitstream. Whether that becomes transparently
+compatible with existing DOS games' native Adlib/Disney-Sound-Source
+port I/O, or needs its own explicit client software, is still an open
+design question -- the parallel port here is already fully committed to
+`DISPATCH_CMD_SD`'s framing, so a second device sharing that same wire
+needs either a second physical LPT port, a V86 port-trapping TSR, or a
+firmware-side hardware snoop on a second port's electrical lines. The
+audio pipeline itself (PCM5102 wiring, PIO/DMA streaming, a bespoke
+`DISPATCH_CMD_SOUND` test command in the sdtest.c style) is the planned
+first concrete step, independent of that question.
+
+**Storage-side optimization is intentionally on hold until the sound
+work is solid.** Specifically: multi-block SD commands (`CMD18`/`CMD25`)
+and any wire-protocol-level burst-transfer redesign are paused, not
+abandoned. Both would touch the same dispatch/wire-protocol layer a
+second, sound-capable device will also need to share -- doing that
+redesign once, informed by both storage's and sound's actual
+requirements, is the goal; doing it now for storage alone would risk
+having to revisit or partially undo it once sound's requirements are
+known. `DISPATCH_CMD_SD` in its current form is considered a stable
+foundation to build the sound work on top of, not a placeholder that's
+about to change shape.
 
 ## CONFIG.SYS usage
 
@@ -90,105 +187,66 @@ Ported and refined from `trinket_ifacetest` and `firmware/`:
 DEVICE=TRINKET.SYS /p=<partition #> /b=<port base index>
 ```
 
-Same option letters as `sdpp-main`, `/k` accepted but inert (see
-above):
+Same option letters as `sdpp-main`, `/k` accepted but inert (see above):
 
 ```
-/d = debugging mode (verbose cdprintf messages, incl. TRINKET.C's own
-     CMD0/CMD8/ACMD41/CMD17/CMD24 diagnostics on failure)
+/d = debugging mode -- DRIVER.C's own verbose cdprintf messages (media
+     check calls, init/read/write status, Debug-mode timing breakdown).
+     TRINKET.C itself always prints one unconditional line on a
+     successful init ("card ready (...)"); the detailed CMD0/CMD8/
+     ACMD41/CMD17/CMD24-level diagnostics that used to live here now run
+     on the trinket's own RP2040 firmware (its own USB-CDC debug log,
+     toggled independently -- see firmware/README.md), not gated by
+     this flag at all.
 /p = partition number (1-4) in the MBR to use. Default: first available.
 /b = port base index: 1=0x3BC, 2=0x378, 3=0x278, 4=0x3E8, 5=0x2E8
      Default: 0x378
 ```
-## Prebuilt Driver
-The toolchain to build the driver is specific and antiqated.  Prebuilt binary can
-be found in the `dist` directory.
 
+## Real-mode hazards this driver had to work around
 
-## Build
+Two hard real-mode issues had to be solved before this could boot
+cleanly, and both recur any time new arithmetic touches this driver's
+`STRATEGY`/`INTERRUPT` call path. **See
+[TOOLCHAIN.md](./TOOLCHAIN.md#known-driver-specific-hazards) for the
+canonical writeup** (including a variant of the second one -- far
+pointer *array indexing*, not just `+=`/`++` -- found later during the
+`DISPATCH_CMD_SD` migration). Short version:
 
-This project requires Borland C++ 3.1 and Turbo Assembler 3.1, identical to the 
-toolchain used by `sdpp-main`. These proprietary tools are not included; if you 
-have a licensed copy, place them in `./legacy/bc31`.
+1. **32-bit shift/multiply pulls in `cs.lib` helpers**
+   (`arg >> 24`, `lba * 512ul`-style `DWORD` operations compile to calls
+   into `N_LXLSH@`/`N_LXURSH@`), which crash with exception 06 from this
+   driver's private stack. Fixed by keeping this arithmetic in 16-bit
+   (`WORD`) pieces -- byte-reinterpretation for command arguments,
+   direct-memory-write construction for `bios_ticks()`.
+2. **Far pointer arithmetic only touches the 16-bit offset** (`p += N`,
+   `p++`, and array indexing `p[i]` all have this problem identically) --
+   it doesn't carry into the segment, so a buffer positioned near a 64K
+   boundary silently corrupts. Fixed by walking a local far pointer via
+   `advance_far_ptr()` instead. `TRINKET.C` and `DRIVER.C` each carry
+   their own independently-written (both verified correct) version of
+   this helper -- a carry-on-wraparound approach in `TRINKET.C`, a
+   two-pass minimal-offset normalization in `DRIVER.C`.
 
-You will also need dosemu2 to run the buildchain in linux with the defualt `Makefile`.
-This will asume that dosemu2 brings up your c drive as `~/.dosemu/drive_c` and copy 
-the build directory there so that the defualt `./src/MAKEFILE` (borland) does not break.
+**Verification, checked directly rather than assumed**: `H_LURSH`/
+`H_LLSH`/`N_LX*` are absent from both the link map and `bcc -S` output
+(re-checked after the `DISPATCH_CMD_SD` migration and the media-check
+rewrite); the DOS build compiles and links cleanly via `build-driver.sh`;
+the driver boots, maps to a drive letter, and has run DOS software from
+the card end to end.
 
-please see https://github.com/dosemu2/dosemu2/issues/1145 for dosemu2 setup.
+## Building on real DOS hardware
 
-if you set up the above you can run: 
-```
-make 
-```
-produces `./bin/trinket.sys`.
+If you're building directly on a period DOS machine rather than
+cross-building via `build-driver.sh`, set up Borland C++ 3.1 the
+standard way in `autoexec.bat`:
 
-## Build on actual DOS notes:
-You will want to properly set up Borland C++ 3.1 using its standard configuration, be sure to set the
-following in your autoexec.bat: 
 ```
 SET INCLUDE=C:\BC31\INCLUDE\
 SET LIB=C:\BC31\LIB
 SET TEMP=C:\TEMP
-
 PATH C:\;C:\BC31\BIN;%PATH%
 ```
 
-`BUILD.BAT` will also try to set these if you just run it from wherever you've set it.
-
-## Functional Mockup:
-### Key Discovery in SDMM.C vs TRINKET.C
-
-The DOS-era SD driver path had two hard real-mode issues that had to be fixed before it could boot cleanly:
-
-1. **32-bit shift/multiply helpers were being pulled in from cs.lib**
-  In Borland C 3.1 16-bit small model (-ms), performing operations like
-  `arg >> 24`, `arg >> 16`, or `lba * 512ul` on DWORD values can force the
-  compiler to emit calls to external runtime helpers such as `LXURSH@`/
-  `H_LURSH` and `LXLSH@`/`H_LLSH` from `cs.lib`.
-
-2. **The far pointer bug**
-  `BYTE DOSFAR *p` arithmetic like `p += 512` only changes the 16-bit
-  offset portion of the far pointer. When the pointer is near the end of a
-  64KB segment, the offset wraps back to zero instead of carrying into the
-  next segment. That corrupts memory during multi-sector reads/writes.
-
-The fix was implemented in `src/TRINKET.C` by replacing the 32-bit shift
-based code with byte-index extraction and by adding a segment-aware
-`advance_far_ptr()` helper:
-
-```c
-static BYTE DOSFAR *advance_far_ptr(BYTE DOSFAR *p, WORD add_bytes)
-{
-   WORD seg = FP_SEG(p);
-   WORD off = FP_OFF(p);
-   seg += (off >> 4);
-   off = (off & 0x0F) + add_bytes;
-   seg += (off >> 4);
-   off &= 0x0F;
-   return (BYTE DOSFAR *) MK_FP(seg, off);
-}
-```
-
-This is used in `disk_read()` and `disk_write()` (as well as `DRIVER.C`'s `ReadBlock()`/`WriteBlock()`) to advance across 64KB segments safely instead of wrapping within the current segment.
-
-### Changes Made to the DOS Driver
-
-1. **High-Level SD Subsystem (`DISPATCH_CMD_SD`)**
-   Offloaded SD protocol negotiation, sector reading, writing, and presence checks onto the RP2040 firmware, eliminating per-byte parallel port dispatch overhead.
-
-2. **Streaming Bulk Handshake (`raw_recv_bulk`)**
-   Implemented bulk nibble read loops in `TRINKET.C` directly into far buffers with segment-normalized pointer stepping.
-
-3. **Fast Media Check & VolID Caching**
-   `SDMediaCheck()` combines a fast firmware status probe (`SD_OP_CHECK_MEDIA` / CMD13) with `bios_ticks()` timestamp caching to prevent redundant Sector 0 reads during frequent DOS calls like `DIR`.
-
-4. **Normalized Far Pointer Arithmetic**
-   Uses 16-bit word arithmetic exclusively to normalize far pointers on multi-sector increments, avoiding segment wraparound and removing all 32-bit `cs.lib` dependencies.
-
-### Verification
-
-- `H_LURSH` / `H_LLSH` / `N_LXLSH@` / `N_LXURSH@` are absent from the link map.
-- The DOS build compiles and links cleanly with zero warnings/errors.
-- The firmware and client test suite compile cleanly.
-
+Then `cd src` and run the vendored `MAKEFILE` (`make -f MAKEFILE`)
+directly.

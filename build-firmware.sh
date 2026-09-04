@@ -14,8 +14,9 @@ cmake -S "$FIRMWARE_DIR" -B "$BUILD_DIR" \
     -DPICO_SDK_PATH="$SDK_PATH" \
     -DPICO_BOARD="$BOARD"
 cmake --build "$BUILD_DIR" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
-cd "./firmware/client" && make
+cd "$FIRMWARE_DIR/client" && make
 cd "$ROOT_DIR"
+mkdir -p "$DIST_DIR"
 cp "$BUILD_DIR/trinket_sd.uf2" "$DIST_DIR/trinket_sd.uf2"
 cp "$FIRMWARE_DIR/client/SDTEST.EXE" "$DIST_DIR/"
 cp "$FIRMWARE_DIR/client/IFTEST.EXE" "$DIST_DIR/"
