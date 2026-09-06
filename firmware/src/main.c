@@ -85,6 +85,7 @@
 #include "pico/stdio.h"
 
 #include "wire.h"
+#include "activity.h"
 #include "dispatch.h"
 #include "subsys_testharness.h"
 #include "subsys_spi.h"
@@ -116,6 +117,7 @@ static void poll_debug_toggle(void) {
 
 int main(void) {
     stdio_init_all();
+    activity_init();
     wire_setup_pins();
     subsys_spi_init();       // bring up SPI0 (GPIO0-3) + CS at the safe default rate/mode
     subsys_sd_init();        // redundant hardware bring-up, same pins -- see subsys_sd.h

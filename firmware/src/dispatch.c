@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "wire.h"
+#include "activity.h"
 #include "subsys_testharness.h"
 #include "subsys_spi.h"
 #include "subsys_sd.h"
@@ -40,15 +41,21 @@ bool dispatch_run_one(void) {
         return false;
     }
 
+    activity_begin();
+
+    bool result;
     switch (cmd) {
         case DISPATCH_CMD_TEST_HARNESS:
-            return subsys_testharness_run();
+            result = subsys_testharness_run();
+            break;
 
         case DISPATCH_CMD_SPI:
-            return subsys_spi_run();
+            result = subsys_spi_run();
+            break;
 
         case DISPATCH_CMD_SD:
-            return subsys_sd_run();
+            result = subsys_sd_run();
+            break;
 
         default:
             // Unknown command: log and go back to idle. No payload
@@ -56,6 +63,9 @@ bool dispatch_run_one(void) {
             // Write case above -- nothing implemented yet beyond the
             // one subsystem in dispatch.h's list.
             printf("DISPATCH: unknown command 0x%02X -- ignoring\n", cmd);
-            return true;
+            result = true;
+            break;
     }
+
+    return result;
 }
