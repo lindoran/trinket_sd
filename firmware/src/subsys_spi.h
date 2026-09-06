@@ -160,18 +160,11 @@ bool subsys_spi_run(void);
  * own. */
 void subsys_spi_reset(void);
 
-/* Enables/disables this subsystem's routine per-operation printf()
- * lines (CS asserted/deasserted, "XFER len=N ok", "read result
- * status=...") -- everything handle_op_cs()/handle_op_xfer()/
- * run_read_side() log on the ordinary, no-error path. Off by default
- * (subsys_spi_init() leaves it false) so a normal DOS-side session
- * isn't paying for ~18 USB-CDC printf lines per 512-byte SD block;
- * main.c's ESC-key toggle on the USB CDC console is the intended way
- * to turn this on for a bring-up/timing session. Does NOT gate the
- * error-path printfs in handle_op_xfer() (oversize request,
- * spi_write_read_blocking() failure) or run_write_side()'s "unknown
- * op" line -- those indicate an actual problem and should stay
- * visible regardless of this setting. */
+/* Enables/disables this subsystem's routine per-operation messages
+ * (CS asserted/deasserted, "XFER len=N ok", "read result status=...")
+ * for a bring-up/timing session. All USB-CDC messages, including
+ * error-path messages, remain globally gated until the main loop's
+ * ESC-key toggle enables debug logging. */
 void subsys_spi_set_debug(bool enabled);
 
 #endif /* TRINKET_SUBSYS_SPI_H */

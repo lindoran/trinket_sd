@@ -210,11 +210,10 @@ bool subsys_sd_run(void);
  * subsys_spi_reset(). */
 void subsys_sd_reset(void);
 
-/* Enables/disables this subsystem's routine per-operation printf()
- * lines, same off-by-default/ESC-toggle convention as
- * subsys_spi_set_debug() -- see that function's header comment. Does
- * NOT gate error-path printfs (CMD0/8/ACMD41 failures, bad data
- * tokens, oversize count) -- those stay visible regardless. */
+/* Enables/disables this subsystem's routine per-operation messages,
+ * using the same off-by-default/ESC-toggle convention as
+ * subsys_spi_set_debug(). All USB-CDC messages, including error-path
+ * messages, remain globally gated until debug logging is enabled. */
 void subsys_sd_set_debug(bool enabled);
 
 #endif /* TRINKET_SUBSYS_SD_H */

@@ -6,7 +6,7 @@
 
 #include "wire.h"
 
-#include <stdio.h>
+#include "debug.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 
@@ -182,7 +182,7 @@ bool wire_finish_read_cycle(uint8_t low_nibble, uint8_t high_nibble) {
 // "reset asserted" == GPIO13 reads HIGH, "reset released" == GPIO13
 // reads LOW.
 void wire_do_reset_sequence(void) {
-    printf("RESET: nAuto-LF asserted, entering known state\n");
+    debug_printf("RESET: nAuto-LF asserted, entering known state\n");
 
     gpio_put(PIN_ERROR, 0);
     write_nibble(0);
@@ -197,5 +197,5 @@ void wire_do_reset_sequence(void) {
     // here depends on precise timing).
     reset_pending = false;
 
-    printf("RESET: nAuto-LF released, resuming normal operation\n");
+    debug_printf("RESET: nAuto-LF released, resuming normal operation\n");
 }

@@ -44,10 +44,10 @@
 
 #include "subsys_spi.h"
 
-#include <stdio.h>
 #include <stdint.h>
 #include <string.h>
 
+#include "debug.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 
@@ -85,9 +85,9 @@ static uint8_t rx_buf[SPI_MAX_XFER];
 static uint16_t rx_len;          // valid bytes in rx_buf from the last completed SPI_OP_XFER
 static uint8_t last_status;      // SPI_STATUS_OK / SPI_STATUS_ERROR, reported on the next Read
 
-// See subsys_spi.h's header comment on subsys_spi_set_debug(). Off by
-// default -- gates only the routine/no-error printf()s below, never
-// the error-path ones.
+// This local flag gates routine/no-error messages for this subsystem.
+// debug_printf() provides the global off-by-default USB-CDC lockdown for
+// both these messages and the error-path messages below.
 static bool debug_enabled = false;
 
 void subsys_spi_set_debug(bool enabled) {
@@ -244,7 +244,7 @@ static bool handle_op_config(void) {
     apply_mode(mode & 0x03u);
 
     if (debug_enabled) {
-        printf("SPI: config mode=%u requested=%luHz\n", (unsigned)(mode & 0x03u), (unsigned long)hz);
+        debug_printf("SPI: config mode=%u requested=%luHz\n", (unsigned)(mode & 0x03u), (unsigned long)hz);
     }
     return true;
 }
@@ -256,10 +256,10 @@ static bool handle_op_cs(void) {
 
     if (level) {
         cs_assert();
-        if (debug_enabled) printf("SPI: CS asserted\n");
+        if (debug_enabled) debug_printf("SPI: CS asserted\n");
     } else {
         cs_deassert();
-        if (debug_enabled) printf("SPI: CS deasserted\n");
+        if (debug_enabled) debug_printf("SPI: CS deasserted\n");
     }
     return true;
 }
@@ -294,7 +294,7 @@ static bool handle_op_xfer(void) {
     }
 
     if (oversize) {
-        printf("SPI: XFER len=%u exceeds SPI_MAX_XFER=%u -- rejected\n",
+        debug_printf("SPI: XFER len=%u exceeds SPI_MAX_XFER=%u -- rejected\n",
                (unsigned)len, (unsigned)SPI_MAX_XFER);
         rx_len = 0;
         last_status = SPI_STATUS_ERROR;
@@ -303,7 +303,7 @@ static bool handle_op_xfer(void) {
 
     int rc = spi_write_read_blocking(SPI_PORT, tx_buf, rx_buf, len);
     if (rc < 0 || (uint16_t)rc != len) {
-        printf("SPI: XFER len=%u spi_write_read_blocking rc=%d -- error\n", (unsigned)len, rc);
+        debug_printf("SPI: XFER len=%u spi_write_read_blocking rc=%d -- error\n", (unsigned)len, rc);
         rx_len = 0;
         last_status = SPI_STATUS_ERROR;
         return true;
@@ -311,7 +311,7 @@ static bool handle_op_xfer(void) {
 
     rx_len = len;
     last_status = SPI_STATUS_OK;
-    if (debug_enabled) printf("SPI: XFER len=%u ok\n", (unsigned)len);
+    if (debug_enabled) debug_printf("SPI: XFER len=%u ok\n", (unsigned)len);
     return true;
 }
 
@@ -335,7 +335,7 @@ static bool run_write_side(void) {
             // subsys_spi.h's header comment on why any payload the
             // host meant to follow a bad opcode can't be recovered
             // generically from here.
-            printf("SPI: unknown op 0x%02X -- ignoring\n", opcode);
+            debug_printf("SPI: unknown op 0x%02X -- ignoring\n", opcode);
             return true;
     }
 }
@@ -367,7 +367,7 @@ static bool run_read_side(void) {
     }
 
     if (debug_enabled) {
-        printf("SPI: read result status=%u len=%u\n", (unsigned)last_status, (unsigned)rx_len);
+        debug_printf("SPI: read result status=%u len=%u\n", (unsigned)last_status, (unsigned)rx_len);
     }
     return true;
 }

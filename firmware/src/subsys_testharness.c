@@ -4,7 +4,7 @@
 
 #include "subsys_testharness.h"
 
-#include <stdio.h>
+#include "debug.h"
 #include <stdint.h>
 
 #include "wire.h"
@@ -38,7 +38,7 @@ bool subsys_testharness_run(void) {
             return false;
         }
         last_byte = byte;
-        printf("WRITE: received 0x%02X\n", last_byte);
+        debug_printf("WRITE: received 0x%02X\n", last_byte);
     } else {
         uint8_t corrected = last_byte ^ 0x88;               // doc sec 7
         uint8_t low_nibble  = corrected & 0x0F;
@@ -54,7 +54,7 @@ bool subsys_testharness_run(void) {
         if (!wire_finish_read_cycle(low_nibble, high_nibble)) {
             return false;
         }
-        printf("READ:  sent     0x%02X\n", last_byte);
+        debug_printf("READ:  sent     0x%02X\n", last_byte);
     }
 
     return true;

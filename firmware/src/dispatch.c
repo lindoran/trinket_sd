@@ -4,9 +4,9 @@
 
 #include "dispatch.h"
 
-#include <stdio.h>
 #include <stdint.h>
 
+#include "debug.h"
 #include "wire.h"
 #include "activity.h"
 #include "subsys_testharness.h"
@@ -32,7 +32,7 @@ bool dispatch_run_one(void) {
         // off to. Log it and let the host's own timeout catch this, the
         // same way any other malformed transfer gets caught on its
         // side (see driver/NOTES.md's ERR_NOT_READY path).
-        printf("DISPATCH: expected command byte (Write), host selected Read -- ignoring\n");
+        debug_printf("DISPATCH: expected command byte (Write), host selected Read -- ignoring\n");
         return true;
     }
 
@@ -62,7 +62,7 @@ bool dispatch_run_one(void) {
             // transfer happens for it, same as the Read-instead-of-
             // Write case above -- nothing implemented yet beyond the
             // one subsystem in dispatch.h's list.
-            printf("DISPATCH: unknown command 0x%02X -- ignoring\n", cmd);
+            debug_printf("DISPATCH: unknown command 0x%02X -- ignoring\n", cmd);
             result = true;
             break;
     }

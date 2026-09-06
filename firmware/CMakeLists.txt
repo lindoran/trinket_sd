@@ -44,6 +44,7 @@ pico_sdk_init()
 
 add_executable(trinket_sd
     src/main.c
+    src/debug.c
     src/activity.c
     src/wire.c
     src/dispatch.c

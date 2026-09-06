@@ -84,6 +84,7 @@
 #include "pico/stdlib.h"
 #include "pico/stdio.h"
 
+#include "debug.h"
 #include "wire.h"
 #include "activity.h"
 #include "dispatch.h"
@@ -94,8 +95,7 @@
 #define KEY_ESC  0x1Bu
 
 // Non-blocking check for an ESC keypress on the USB CDC console,
-// toggling subsys_spi.c's routine debug printf()s (see
-// subsys_spi_set_debug()'s header comment). Deliberately polled only
+// toggling the firmware's USB-CDC debug logging. Deliberately polled only
 // here, once per main-loop iteration between dispatch cycles -- NOT
 // from inside wire.c's wire_wait_init_high()/wait loops, which are
 // the timing-critical path every byte handshake goes through and
@@ -109,9 +109,11 @@ static void poll_debug_toggle(void) {
     int c = getchar_timeout_us(0);
     if (c == KEY_ESC) {
         debug_on = !debug_on;
+        debug_set_enabled(debug_on);
+        activity_set_debug(debug_on);
         subsys_spi_set_debug(debug_on);
         subsys_sd_set_debug(debug_on);
-        printf("trinket firmware: SPI/SD debug logging %s\n", debug_on ? "ON" : "OFF");
+        debug_printf("trinket firmware: debug logging ON\n");
     }
 }
 
@@ -123,11 +125,10 @@ int main(void) {
     subsys_sd_init();        // redundant hardware bring-up, same pins -- see subsys_sd.h
     wire_setup_reset_irq();
 
-    // Give USB CDC a moment to enumerate before the first printf, purely
+    // Give USB CDC a moment to enumerate before the first diagnostic, purely
     // so early messages aren't lost while a terminal is still attaching.
     sleep_ms(1500);
-    printf("trinket firmware: ready (dispatcher, 3 subsystems: test harness, SPI, SD)\n");
-    printf("trinket firmware: SPI/SD debug logging OFF by default -- press ESC on this console to toggle both\n");
+    debug_printf("trinket firmware: ready (dispatcher, 3 subsystems: test harness, SPI, SD)\n");
 
     while (true) {
         // Checked first, every iteration: covers reset asserted between

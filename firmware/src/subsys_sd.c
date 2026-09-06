@@ -25,9 +25,9 @@
 
 #include "subsys_sd.h"
 
-#include <stdio.h>
 #include <stdint.h>
 
+#include "debug.h"
 #include "hardware/spi.h"
 #include "hardware/gpio.h"
 
@@ -190,7 +190,7 @@ static bool sd_do_init(void) {
         if (r1 == 0x01u) break;
     }
     if (r1 != 0x01u) {
-        if (debug_enabled) printf("SD: CMD0 failed, r1=0x%02X (no card / not responding)\n", r1);
+        if (debug_enabled) debug_printf("SD: CMD0 failed, r1=0x%02X (no card / not responding)\n", r1);
         cs_deassert();
         return false;
     }
@@ -202,7 +202,7 @@ static bool sd_do_init(void) {
         spi_write_read_blocking(SPI_PORT, tx, rx, 4);
         for (j = 0; j < 4; j++) r7[j] = rx[j];
         if (r7[2] != 0x01u || r7[3] != 0xAAu) {
-            printf("SD: CMD8 pattern mismatch -- unsupported card\n");
+            debug_printf("SD: CMD8 pattern mismatch -- unsupported card\n");
             cs_deassert();
             return false;
         }
@@ -210,7 +210,7 @@ static bool sd_do_init(void) {
     } else if (r1 & 0x04u) {
         is_v2 = false;   // illegal command -- SDv1 or MMC
     } else {
-        printf("SD: CMD8 unexpected r1=0x%02X\n", r1);
+        debug_printf("SD: CMD8 unexpected r1=0x%02X\n", r1);
         cs_deassert();
         return false;
     }
@@ -219,13 +219,13 @@ static bool sd_do_init(void) {
         r1 = sd_acmd41(is_v2 ? 0x40000000ul : 0ul);
         if (r1 == 0x00u) break;
         if (r1 != 0x01u) {
-            printf("SD: ACMD41 unexpected r1=0x%02X\n", r1);
+            debug_printf("SD: ACMD41 unexpected r1=0x%02X\n", r1);
             cs_deassert();
             return false;
         }
     }
     if (r1 != 0x00u) {
-        printf("SD: ACMD41 never left idle -- timeout\n");
+        debug_printf("SD: ACMD41 never left idle -- timeout\n");
         cs_deassert();
         return false;
     }
@@ -233,7 +233,7 @@ static bool sd_do_init(void) {
     if (is_v2) {
         r1 = sd_cmd(58, 0);
         if (r1 != 0x00u) {
-            printf("SD: CMD58 unexpected r1=0x%02X\n", r1);
+            debug_printf("SD: CMD58 unexpected r1=0x%02X\n", r1);
             cs_deassert();
             return false;
         }
@@ -243,7 +243,7 @@ static bool sd_do_init(void) {
         if (!sd_block_addressed) {
             r1 = sd_cmd(16, 512ul);
             if (r1 != 0x00u) {
-                printf("SD: CMD16 (set blocklen 512) failed, r1=0x%02X\n", r1);
+                debug_printf("SD: CMD16 (set blocklen 512) failed, r1=0x%02X\n", r1);
                 cs_deassert();
                 return false;
             }
@@ -251,7 +251,7 @@ static bool sd_do_init(void) {
     } else {
         r1 = sd_cmd(16, 512ul);
         if (r1 != 0x00u) {
-            printf("SD: CMD16 (set blocklen 512) failed, r1=0x%02X\n", r1);
+            debug_printf("SD: CMD16 (set blocklen 512) failed, r1=0x%02X\n", r1);
             cs_deassert();
             return false;
         }
@@ -264,7 +264,7 @@ static bool sd_do_init(void) {
 
     sd_is_v2 = is_v2;
     if (debug_enabled) {
-        printf("SD: init ok (%s, %s-addressed)\n",
+        debug_printf("SD: init ok (%s, %s-addressed)\n",
                sd_is_v2 ? "SDv2" : "SDv1/MMC",
                sd_block_addressed ? "block" : "byte");
     }
@@ -298,7 +298,7 @@ static bool sd_read_one_sector(uint32_t lba, uint8_t *out) {
     cs_assert();
     r1 = sd_cmd(17, sd_arg_for_lba(lba));
     if (r1 != 0x00u) {
-        printf("SD: CMD17 lba=%lu r1=0x%02X\n", (unsigned long)lba, r1);
+        debug_printf("SD: CMD17 lba=%lu r1=0x%02X\n", (unsigned long)lba, r1);
         cs_deassert();
         return false;
     }
@@ -309,7 +309,7 @@ static bool sd_read_one_sector(uint32_t lba, uint8_t *out) {
         if (token != 0xFFu) break;
     }
     if (token != 0xFEu) {
-        printf("SD: CMD17 lba=%lu bad data token 0x%02X\n", (unsigned long)lba, token);
+        debug_printf("SD: CMD17 lba=%lu bad data token 0x%02X\n", (unsigned long)lba, token);
         cs_deassert();
         return false;
     }
@@ -331,7 +331,7 @@ static bool sd_write_one_sector(uint32_t lba, const uint8_t *in) {
     cs_assert();
     r1 = sd_cmd(24, sd_arg_for_lba(lba));
     if (r1 != 0x00u) {
-        printf("SD: CMD24 lba=%lu r1=0x%02X\n", (unsigned long)lba, r1);
+        debug_printf("SD: CMD24 lba=%lu r1=0x%02X\n", (unsigned long)lba, r1);
         cs_deassert();
         return false;
     }
@@ -344,7 +344,7 @@ static bool sd_write_one_sector(uint32_t lba, const uint8_t *in) {
 
     resp = spi_byte(0xFFu);
     if ((resp & 0x1Fu) != 0x05u) {
-        printf("SD: CMD24 lba=%lu data rejected, resp=0x%02X\n", (unsigned long)lba, resp);
+        debug_printf("SD: CMD24 lba=%lu data rejected, resp=0x%02X\n", (unsigned long)lba, resp);
         cs_deassert();
         return false;
     }
@@ -391,7 +391,7 @@ static bool handle_op_read_sectors(void) {
     count = b[4];
 
     if (count > SD_MAX_SECTORS) {
-        printf("SD: READ_SECTORS count=%u exceeds SD_MAX_SECTORS=%u -- rejected\n",
+        debug_printf("SD: READ_SECTORS count=%u exceeds SD_MAX_SECTORS=%u -- rejected\n",
                (unsigned)count, (unsigned)SD_MAX_SECTORS);
         sd_last_status = SD_STATUS_ERROR;
         sd_last_len = 0;
@@ -408,7 +408,7 @@ static bool handle_op_read_sectors(void) {
 
     sd_last_status = SD_STATUS_OK;
     sd_last_len = (uint16_t)((uint32_t)count * 512u);
-    if (debug_enabled) printf("SD: READ_SECTORS lba=%lu count=%u ok\n", (unsigned long)lba, (unsigned)count);
+    if (debug_enabled) debug_printf("SD: READ_SECTORS lba=%lu count=%u ok\n", (unsigned long)lba, (unsigned)count);
     return true;
 }
 
@@ -438,7 +438,7 @@ static bool handle_op_write_sectors(void) {
     }
 
     if (oversize) {
-        printf("SD: WRITE_SECTORS count=%u exceeds SD_MAX_SECTORS=%u -- rejected\n",
+        debug_printf("SD: WRITE_SECTORS count=%u exceeds SD_MAX_SECTORS=%u -- rejected\n",
                (unsigned)count, (unsigned)SD_MAX_SECTORS);
         sd_last_status = SD_STATUS_ERROR;
         sd_last_len = 0;
@@ -455,7 +455,7 @@ static bool handle_op_write_sectors(void) {
 
     sd_last_status = SD_STATUS_OK;
     sd_last_len = 0;
-    if (debug_enabled) printf("SD: WRITE_SECTORS lba=%lu count=%u ok\n", (unsigned long)lba, (unsigned)count);
+    if (debug_enabled) debug_printf("SD: WRITE_SECTORS lba=%lu count=%u ok\n", (unsigned long)lba, (unsigned)count);
     return true;
 }
 
@@ -464,7 +464,7 @@ static bool handle_op_check_media(void) {
     sd_last_status = ok ? SD_STATUS_OK : SD_STATUS_ERROR;
     sd_last_len = 0;
     if (debug_enabled) {
-        printf("SD: CHECK_MEDIA %s\n", ok ? "card responding" : "no response / not initialized");
+        debug_printf("SD: CHECK_MEDIA %s\n", ok ? "card responding" : "no response / not initialized");
     }
     return true;
 }
@@ -486,7 +486,7 @@ static bool run_write_side(void) {
         case SD_OP_CHECK_MEDIA:
             return handle_op_check_media();
         default:
-            printf("SD: unknown op 0x%02X -- ignoring\n", opcode);
+            debug_printf("SD: unknown op 0x%02X -- ignoring\n", opcode);
             return true;
     }
 }
@@ -523,7 +523,7 @@ static bool run_read_side(void) {
     }
 
     if (debug_enabled) {
-        printf("SD: read result status=%u len=%u\n", (unsigned)sd_last_status, (unsigned)sd_last_len);
+        debug_printf("SD: read result status=%u len=%u\n", (unsigned)sd_last_status, (unsigned)sd_last_len);
     }
     return true;
 }
