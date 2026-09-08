@@ -1,0 +1,40 @@
+# Makefile for the DOS-side diagnostic clients (SDTEST.EXE, IFTEST.EXE)
+# -- built with Borland C++ 3.1, small model. Same toolchain/model as
+# src/MAKEFILE (TRINKET.SYS itself); see TOOLCHAIN.md for why this
+# project standardized on BC31 for everything DOS-side.
+#
+# NOTE: use $(INCLUDE)/$(LIB) (make macro expansion, resolved by make
+# itself before it invokes bcc), NOT %INCLUDE%/%LIB% (COMMAND.COM batch
+# expansion -- doesn't apply here since make never routes through a
+# spawned shell). Same convention as src/MAKEFILE.
+#
+# Deliberately NOT using bcc's -o flag: -o names the intermediate
+# OBJECT file, not the final .EXE (confirmed the hard way while
+# porting these two files off ia16-elf-gcc -- `bcc -oSDTEST.EXE
+# sdtest.c` compiles clean but then Turbo Link fails with "Unable to
+# open file 'sdtest.obj'", because the compiler wrote its object out
+# as SDTEST.EXE instead of the SDTEST.OBJ the auto-invoked linker
+# still goes looking for). Letting bcc name the .EXE from the source
+# basename (the default when -o is omitted) is what actually works.
+#
+# Both targets are single-file one-step builds (bcc compiles AND
+# links in one invocation here, unlike src/MAKEFILE's separate
+# bcc -c / tlink steps -- that split exists there because TRINKET.SYS
+# is a freestanding .SYS device driver needing tlink's -t/-m/-s/-n
+# flags directly; these are ordinary .EXEs with normal C startup, so
+# bcc's own default one-step drive of tlink is simpler and sufficient).
+
+CC=bcc -ms -I$(INCLUDE) -L$(LIB)
+
+all: sdtest.exe iftest.exe
+
+sdtest.exe: sdtest.c
+   $(CC) sdtest.c
+
+iftest.exe: iftest.c
+   $(CC) iftest.c
+
+clean:
+   del *.obj
+   del sdtest.exe
+   del iftest.exe

@@ -39,10 +39,7 @@ command_check arm-none-eabi-gcc
 file_check "$SDK_PATH/pico_sdk_init.cmake" "Pico SDK 2.3.0"
 file_check "$PICOTOOL_PATH" "picotool 2.3.0"
 
-printf '\nDOS client toolchain:\n'
-command_check ia16-elf-gcc
-
-printf '\nDOS driver toolchain:\n'
+printf '\nDOS toolchain (driver + diagnostic clients, Borland C++ 3.1 under dosbox):\n'
 command_check dosbox
 file_check "$BC31_DIR" "Borland C++ 3.1 directory"
 for tool in BCC.EXE MAKE.EXE TLINK.EXE TASM.EXE; do
@@ -59,7 +56,6 @@ fi
 
 printf '%d dependency check(s) failed. Suggested next steps:\n' "$missing"
 printf '  Firmware: install gcc-arm-none-eabi, cmake, git, and picotool; or set PICO_SDK_PATH to a Pico SDK 2.3.0 checkout.\n'
-printf '  DOS client: install or build ia16-elf-gcc (it is not normally available from apt).\n'
-printf '  DOS driver: install dosbox and provide a legally obtained Borland C++ 3.1 copy under legacy/bc31/.\n'
+printf '  DOS toolchain (driver + clients): install dosbox and provide a legally obtained Borland C++ 3.1 copy under legacy/bc31/.\n'
 printf '  Packaging: install tar, 7z (p7zip), and zip.\n'
 exit 1

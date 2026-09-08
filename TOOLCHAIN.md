@@ -1,23 +1,40 @@
 # Toolchains
 
-This project spans three genuinely different compilers, because its three
-build targets run on three different eras of hardware: a 1990s-era 16-bit
-DOS driver, a 2020s-era ARM microcontroller, and 16-bit DOS command-line
-tools. There's no single toolchain that covers all of it. This document
-is a single, honest reference for what each one needs, how reliably each
-one can actually be stood up in a fresh sandbox (verified hands-on, not
-assumed), and what a future port away from any of them would involve.
+This project spans two genuinely different compilers, because its build
+targets run on two different eras of hardware: 1990s-era 16-bit DOS code
+(the driver AND the diagnostic clients) and a 2020s-era ARM
+microcontroller. This document is a single, honest reference for what
+each one needs, how reliably each one can actually be stood up in a
+fresh sandbox (verified hands-on, not assumed), and what a future port
+away from either would involve.
+
+**Toolchain decision (2026-09-08): Borland C++ 3.1 is this project's one
+DOS-side toolchain, driver and diagnostic clients alike.** It used to be
+two -- BC31 for the driver, ia16-elf-gcc for `firmware/client/*.c` --
+because the driver needs a real freestanding `.SYS` binary and the
+client tools started out as ia16-elf-gcc experiments before BC31 was
+vendored. ia16-elf-gcc never got a working fresh-sandbox install path
+(see the retired section this replaced, preserved in git history) and
+left every client-tool change "syntax-checked, never fully verified"
+until it happened to reach real hardware. BC31 has neither problem: it's
+already vendored, already proven end-to-end (TRINKET.SYS, real hardware,
+the Wolf3D milestone), and now builds `sdtest.c`/`iftest.c` too --
+confirmed via a real compile+link under the vendored `bcc`/`tlink`
+(headless dosbox), zero errors, zero warnings, on the first attempt once
+two DOS-toolchain-specific build gotchas (below) were worked out. See
+`build-client.sh`.
 
 Quick status, as of this writing:
 
-| Target                        | Toolchain              | Fresh-sandbox reproducible? |
-|--------------------------------|-------------------------|------------------------------|
-| DOS driver (TRINKET.SYS)      | Borland C++ 3.1 + dosbox | **No** -- see below |
-| RP2040 firmware               | arm-none-eabi-gcc + pico-sdk | Yes, apt + git clone |
-| DOS client tools (sdtest.c etc)| ia16-elf-gcc            | **No** -- no viable path found |
-| *(not used yet, evaluated)*   | Open Watcom             | Yes, with one documented workaround |
+| Target                          | Toolchain                    | Fresh-sandbox reproducible? |
+|----------------------------------|-------------------------------|------------------------------|
+| DOS driver (TRINKET.SYS)        | Borland C++ 3.1 + dosbox      | **No** -- see below |
+| DOS diagnostic clients (SDTEST.EXE, IFTEST.EXE) | Borland C++ 3.1 + dosbox | **No** -- same reason as the driver |
+| RP2040 firmware                 | arm-none-eabi-gcc + pico-sdk  | Yes, apt + git clone |
+| *(retired 2026-09-08)*          | ia16-elf-gcc                  | No -- see git history for the old writeup |
+| *(evaluated, not adopted)*      | Open Watcom                   | Yes, with one documented workaround |
 
-## DOS driver: Borland C++ 3.1 (`legacy/bc31/`) + dosbox
+## DOS driver + diagnostic clients: Borland C++ 3.1 (`legacy/bc31/`) + dosbox
 
 **The binaries are deliberately not in git.** `legacy/bc31/*` is gitignored
 (only a `.gitkeep` ships) because Borland C++ 3.1 is old proprietary
@@ -39,14 +56,49 @@ Once that's in place:
 apt-get install dosbox   # or your distro's equivalent
 ./build-driver.sh        # -> dist/TRINKET.SYS
 ./clean-driver.sh
+./build-client.sh        # -> dist/SDTEST.EXE, dist/IFTEST.EXE
+./clean-client.sh
 ```
 
 `build-driver.sh` copies `legacy/bc31/` and `src/*.C`/`*.H`/`*.ASM`/
 `MAKEFILE` into a scratch directory, mounts that as dosbox's C:/D:
 drives, runs `make -f MAKEFILE` headlessly (`SDL_VIDEODRIVER=dummy`,
-`-exit`), and copies the resulting `TRINKET.SYS` out. No X server, no
-interactive dosbox window, no dosemu2 -- dosbox alone has been sufficient
-for every build this project has needed, compile-side, all project long.
+`-exit`), and copies the resulting `TRINKET.SYS` out. `build-client.sh`
+is the same shape one level down (`firmware/client/*.c` +
+`firmware/client/MAKEFILE`), producing `SDTEST.EXE`/`IFTEST.EXE`. No X
+server, no interactive dosbox window, no dosemu2 -- dosbox alone has been
+sufficient for every build this project has needed, compile-side, all
+project long.
+
+**Two build-system gotchas found while porting the clients to BC31,
+neither driver-specific -- worth knowing before touching either
+Makefile or adding a new DOS-side source file:**
+
+1. **`bcc`'s `-o` flag names the *object* file, not the final `.EXE`.**
+   `bcc -ms -oSDTEST.EXE sdtest.c` compiles clean with zero diagnostics,
+   then fails at the auto-invoked link step with `Fatal: Unable to open
+   file 'sdtest.obj'` -- the compiler wrote its object out as
+   `SDTEST.EXE` (per `-o`) instead of the `SDTEST.OBJ` the linker still
+   goes looking for by default. Fix: don't pass `-o` for a single-file
+   one-step build at all; bcc names the `.EXE` from the source basename
+   automatically, which is already what's wanted. (The driver's own
+   `src/MAKEFILE` never hit this because it uses `bcc -c` to compile
+   only, then invokes `tlink` directly by hand with explicit names --
+   the `-o`-names-the-object behavior is only a trap for a combined
+   compile+link invocation.)
+2. **DOS 8.3 filenames are a real, enforced constraint under dosbox +
+   this compiler**, not just a cosmetic old-DOS quirk. `ifacetest.c` (9
+   characters before the extension) doesn't fit and produced `Error:
+   Could not find file 'ifacetest.c'` even though the file was right
+   there in the mounted directory -- dosbox silently exposes it under a
+   truncated/generated alias instead. Renamed to `iftest.c` (6
+   characters) to fix this permanently rather than work around it per
+   build; this also finally makes the source filename match the
+   `IFTEST.EXE` name its own Makefile target and usage docs already
+   used, which never actually agreed with `ifacetest.c`/`IFACETEST.EXE`
+   even before this port. Any future DOS-side source file (the dropped
+   `dactest.c` included, if/when that work resumes) needs an 8.3-safe
+   name from the start.
 
 **Why not dosemu2 too?** It was mentioned early on as a possible
 fallback, but it's never actually been used or needed -- every single
@@ -87,44 +139,37 @@ script's own idempotency check, not by the actual build. If you hit
 -DPICO_SDK_PATH=... -DPICO_BOARD=pico && cmake --build firmware/build`
 produces a complete, valid `.uf2` with no picotool involved at all.
 
-`build-firmware.sh` also builds the client tools (`firmware/client/`,
-ia16-elf-gcc) as its last step -- see the next section for why that part
-is much less reliable.
+`build-firmware.sh` no longer builds the DOS client tools as a last step
+(that moved to `build-client.sh`/BC31, 2026-09-08 -- see the next
+section).
 
-## DOS client tools (`firmware/client/*.c`): ia16-elf-gcc
+## Retired: DOS client tools on ia16-elf-gcc
 
-**No reliable fresh-sandbox path currently exists.** Checked twice this
-project, from scratch:
+`firmware/client/*.c` (`sdtest.c`, the file now named `iftest.c`) used to
+target ia16-elf-gcc. That toolchain never got a working fresh-sandbox
+install path in two separate attempts -- not packaged in apt, real
+binaries only via a Launchpad PPA and GitLab releases (both outside
+typical sandbox network allowlists), and building the full
+binutils/gcc/newlib cross-toolchain from source was judged too large an
+undertaking to justify for test-client code specifically. The fallback
+(`gcc -fsyntax-only` against the file as ordinary portable C) caught real
+bugs but provably not everything: a 32KB stack buffer that silently
+violated the 16-bit tiny model's object-size limits, and an inline-asm
+operand constraint (`"Nd"`) this compiler mishandled once inlined under
+`-O2` both slipped past it and only surfaced under a real build. Every
+change made without real ia16-elf-gcc access carried a standing
+"syntax-checked, not verified" caveat as a result.
 
-- Not packaged in apt (`ia16-elf-gcc` isn't a real Debian/Ubuntu package).
-- The maintainer's real prebuilt binaries are distributed via a Launchpad
-  PPA and GitLab releases -- both outside what a typical sandboxed agent
-  environment can reach (network allowlists tend to cover GitHub, PyPI,
-  npm, crates.io; Launchpad and GitLab usually aren't on that list).
-- Building the full cross-toolchain from source (`build-ia16`'s own
-  documented pipeline: binutils -> gcc stage 1 -> newlib -> gcc stage 2,
-  against a ~2017-era GCC 6.3) was judged too large and fragile an
-  undertaking to attempt for test-client code specifically, versus the
-  actual DOS driver.
-
-**Fallback used throughout this project**: `gcc -Wall -Wextra
--fsyntax-only` against the file, treating it as ordinary portable C. This
-catches real syntax and type errors and has caught several actual bugs,
-but it provably cannot catch everything -- two real, hardware-confirmed
-bugs slipped past it and only showed up under a real `ia16-elf-gcc`
-build: a 32KB stack buffer that silently violates the 16-bit tiny memory
-model's object-size limits (invisible on a 64-bit host, where 32KB is a
-trivial stack allocation), and an inline-asm constraint (`"Nd"` for
-IN/OUT port operands) that this specific compiler mishandles once the
-containing function gets inlined under `-O2` -- fine as a real,
-un-inlined function body (which is all it ever was at `-O0`), broken the
-moment it's duplicated across many inlined call sites. Both are now
-documented in the code comments at the exact lines they bit.
-
-**The practical implication**: any client-tool change made without a
-real `ia16-elf-gcc` available should be treated as "syntax-checked, not
-verified" until it's actually built and run. That's not a hypothetical
-caveat -- it's happened twice.
+As of 2026-09-08 these files are ported to Borland C++ 3.1 instead (see
+the toolchain-decision note and the two build gotchas at the top of this
+document) -- a real compile+link is available in every sandbox that has
+`legacy/bc31/` supplied, the same as the driver, so this caveat no longer
+applies to them. The old GCC inline-asm port-I/O (`outportb`/`inportb`)
+and the raw `int $0x1a` timing call are both gone, replaced by BC31's
+`<dos.h>` builtins and `int86()` respectively -- see `iftest.c`/
+`sdtest.c`'s own header comments for exactly what changed and why the
+rest of the logic (handshake sequencing, SD command layer, FAT16
+parsing) carried over unmodified.
 
 ## Evaluated but not adopted: Open Watcom
 
@@ -154,26 +199,36 @@ from documentation alone:
   executable, MZ for MS-DOS`) using nothing but this extracted tree.
 
 This is real, working evidence that Open Watcom is available in a way
-neither Borland (gitignored, no legitimate redistribution path) nor
-ia16-elf-gcc (no reachable binary distribution at all) currently is. It
-is **not** currently used anywhere in this project -- no driver code has
-been ported to it or tested against it, and see the next section for why
-that's a real project, not a quick swap.
+Borland (gitignored, no legitimate redistribution path) currently isn't.
+It is **not** currently used anywhere in this project -- no driver or
+client code has been ported to it or tested against it, and see the next
+section for why that's a real project, not a quick swap. The
+ia16-elf-gcc option this paragraph used to also compare against is
+retired project-wide as of 2026-09-08 (see above) -- Watcom's comparison
+point now is Borland alone, not a three-way choice.
 
-## Should the driver be ported off Borland?
+## Should this project be ported off Borland?
 
-The honest, evidence-based version of this question, given everything
-above: switching the *driver* to ia16-elf-gcc would not help -- it would
-extend that toolchain's "syntax-checked, never fully verified" status to
-the driver too, which is strictly worse than where the driver stands
-today (full real compile+link+disassembly verification, every time, via
-dosbox). That's a real downgrade, not a lateral move.
+This used to be asked driver-only; as of 2026-09-08 (BC31 now covers the
+clients too -- see the toolchain-decision note at the top of this
+document) it's really one question for the whole DOS side. The honest,
+evidence-based version, given everything above: nothing here is
+currently blocking on it. BC31 gives every DOS-side file in this project
+full real compile+link verification via dosbox, every time -- strictly
+better than ia16-elf-gcc's "syntax-checked, never fully verified" status
+ever was for the clients, and there's no analogous gap for the driver to
+begin with. The only real pressure toward a future port is Borland's own
+redistribution restriction (`legacy/bc31/*` gitignored, supplied
+out-of-band by whoever's building this) -- not a technical shortcoming
+of BC31 itself.
 
-Open Watcom is the toolchain actually worth considering for a future
-port, specifically because of what's in the table above: it's the only
-16-bit DOS-capable compiler here with both a real automatable fetch path
-*and* active maintenance, unlike a 1992 compiler nobody can legally
-re-fetch. But porting is genuine work, not a config change:
+Open Watcom is the toolchain actually worth considering if that pressure
+ever does force the question, specifically because of what's in the
+table above: it's the only 16-bit DOS-capable compiler here with both a
+real automatable fetch path *and* active maintenance, unlike a 1992
+compiler nobody can legally re-fetch. But porting is genuine work, not a
+config change, and now applies to two source trees (`src/`,
+`firmware/client/`) instead of one:
 
 - **The DWORD-shift/cs.lib hazard (see below) is Borland-specific and
   unverified for Watcom.** Whether Watcom's runtime has an analogous
@@ -197,8 +252,37 @@ quick swap alongside other driver work.
 
 ## Known driver-specific hazards (Borland C++ 3.1, this call path)
 
-Two real, hardware-confirmed landmines specific to compiling this driver
-with Borland C++ 3.1, neither of which a clean compile+link will catch:
+Two real, hardware-confirmed landmines specific to compiling **the
+driver** (`src/`) with Borland C++ 3.1, neither of which a clean
+compile+link will catch. Both are tied to things only the driver does --
+being invoked on DOS's `STRATEGY`/`INTERRUPT` private-stack calling
+convention, and receiving far pointers to buffers DOS itself placed
+without this project's control. **Neither is expected to apply to
+`firmware/client/*.c`**: those are plain `.EXE`s with a normal C startup
+(never on a driver's private stack) and own all their buffers statically
+(never a DOS-supplied far pointer crossing a segment boundary this
+project doesn't control) -- see `iftest.c`/`sdtest.c`'s own header
+comments for that reasoning spelled out per-file.
+
+**Checked, not just reasoned through (2026-09-08):** `bcc -S` on
+`sdtest.c` confirms `N_LXLSH@`/`N_LXURSH@`/`N_LXMUL@` genuinely get
+called (from `sd2_read_sectors`/`sd2_write_sectors`/`sd_cmd`/
+`sd_arg_for_lba`/`rd_u32`/`fat16_mount`/`fat16_cluster_lba`/
+`fat16_next_cluster`/`cmd_bench`/`cmd_fastbench` -- `iftest.c` has none
+at all, no DWORD arithmetic there) -- and every call site sits inside a
+completely ordinary `push bp`/`mov bp,sp` frame with BP-relative locals,
+nothing resembling a private stack. Beyond the static check, a
+standalone harness reproducing the exact same shift/multiply/div
+patterns, built the same `-ms` way, was actually **run** under dosbox
+(not just compiled) and returned correct results for all of them, no
+crash -- about as close to a real hardware proof as this sandbox can
+get. Residual gap: that's dosbox's 8086-compatible CPU emulation, not a
+period-real chip, though this class of operation (integer
+shift/multiply/call/ret, nothing timing- or peripheral-sensitive) is
+exactly where emulator fidelity is least likely to diverge. Same
+`bcc -S`/`grep N_LX` recipe (below) still worth running on any *new*
+client-side 32-bit arithmetic before trusting it -- this check covers
+what exists in `sdtest.c`/`iftest.c` today, not future changes.
 
 1. **A 32-bit (`DWORD`) shift or multiply**, anywhere in the code path
    reachable from `STRATEGY`/`INTERRUPT` (i.e. almost everything in

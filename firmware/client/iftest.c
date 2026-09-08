@@ -1,10 +1,11 @@
 /*
- * ifacetest.c -- DOS-side raw interface test for the RP2040 LPT trinket
- * link, built for ia16-elf-gcc. Companion to the trinket_ifacetest Pico
- * project, which now runs a small command dispatcher in front of the
- * same echo-the-last-byte test harness this file always talked to (see
- * src/dispatch.h) -- every transfer this file sends now has to be
- * preceded by its own dispatch command byte, selecting that subsystem.
+ * iftest.c -- DOS-side raw interface test for the RP2040 LPT trinket
+ * link, built for Borland C++ 3.1 (small model). Companion to the
+ * trinket_ifacetest Pico project, which runs a small command dispatcher
+ * in front of the same echo-the-last-byte test harness this file always
+ * talked to (see src/dispatch.h) -- every transfer this file sends has
+ * to be preceded by its own dispatch command byte, selecting that
+ * subsystem.
  *
  * This is a standalone diagnostic, NOT part of TRINKET.SYS/trinket.asm.
  * It talks to the parallel port directly, with no driver in between, so
@@ -21,7 +22,7 @@
  * already has to be kept in sync; see this file's other header notes.)
  *
  * Usage:
- *   IFACETEST.EXE [byte_hex] [port_hex]
+ *   IFTEST.EXE [byte_hex] [port_hex]
  *     byte_hex  - byte to send, hex, no prefix (default 5A)
  *     port_hex  - LPT base I/O port, hex, no prefix (default 378)
  *
@@ -36,58 +37,55 @@
  * Deliberately does NOT read the BIOS Data Area for the LPT port --
  * override on the command line instead. One less untested code path.
  *
- * UNTESTED: written from the protocol doc and trinket.asm's existing,
- * hardware-confirmed transport core as reference, but there's no way to
- * run real-mode DOS port I/O in the sandbox this was written in, and
- * the inline-asm in/out sequences below have not been run through
- * ia16-elf-gcc. Build and try it on real hardware (or 86Box) before
- * trusting it; if the inline asm constraints below don't compile
- * cleanly on your ia16-elf-gcc version, that's the first thing to fix.
+ * PORTED FROM ia16-elf-gcc (2026-09-08): this project's DOS toolchain is
+ * moving to Borland C++ 3.1 across the board -- ia16-elf-gcc has no
+ * viable fresh-sandbox install path (see TOOLCHAIN.md), while BC31 is
+ * already vendored, already proven end-to-end (TRINKET.SYS, real
+ * hardware, Wolf3D milestone) and already has a working headless
+ * dosbox build script. The only change of substance from the
+ * ia16-elf-gcc version: outportb()/inportb() were hand-rolled GCC
+ * inline asm there (needed because ia16-elf-gcc has no built-in port
+ * I/O); Borland's <dos.h> provides both natively, so the inline asm is
+ * gone and there is no assembly anywhere in this file. Every other
+ * line -- handshake sequencing, control-bit meanings, timing constants,
+ * command-line handling -- is unchanged. This file has no far pointers
+ * and does no 32-bit shifts/multiplies at all, so neither of this
+ * project's two established BC31 hazards (DWORD-shift-from-a-private-
+ * stack, far-pointer offset-only arithmetic -- see TOOLCHAIN.md/driver
+ * notes) applies here; those are specific to TRINKET.SYS's device-
+ * driver calling context and to buffers DOS itself hands in via far
+ * pointers, neither of which exists in a plain .EXE that owns all its
+ * own storage. Still genuinely UNTESTED against real hardware -- only
+ * compiled clean under the vendored bcc via headless dosbox so far (see
+ * TOOLCHAIN.md for that verification). Build and try it on real
+ * hardware before trusting it.
  *
  * Build:
- *   ia16-elf-gcc -o IFACETEST.EXE ifacetest.c
- * (add -mcmodel=small or whatever model matches your other ia16 builds
- * if you use one elsewhere; this file has no far pointers, so the
- * default model should be fine.)
+ *   bcc -ms -I$(INCLUDE) -L$(LIB) iftest.c
+ * (see firmware/client/MAKEFILE; matches src/MAKEFILE's -ms small-model
+ * convention for TRINKET.SYS itself.) Produces IFTEST.EXE (bcc names
+ * the .EXE from the source basename when no -o is given -- see this
+ * project's TOOLCHAIN.md for why -o is deliberately NOT used here: it
+ * names the *object* file, not the executable, and silently breaks the
+ * automatic link step if pointed at a .EXE name. Renamed from
+ * ifacetest.c/IFACETEST.EXE during the BC31 port (2026-09-08): DOS 8.3
+ * filenames can't hold "ifacetest" (9 chars, one over the limit) --
+ * this also finally matches the name the ia16-elf-gcc-era Makefile's
+ * IFTEST.EXE target already used, which the old source/header comments
+ * never actually agreed on.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <dos.h>
 
 /* ---------------------------------------------------------------------
- * Raw port I/O. No <dos.h>/<conio.h> dependency -- written directly in
- * inline asm so this file only needs a working C compiler + assembler,
- * nothing else.
- *
- * Forces the "d" (DX-only) alternative rather than the more standard
- * GCC x86 "Nd" (8-bit-immediate-or-DX) idiom, even though every actual
- * call site here passes a runtime value that "Nd" would resolve to DX
- * anyway -- confirmed via disassembly this generates the exact same
- * `mov dx,[port]; out dx,al` either way at this file's current -O0
- * build, so this is a zero-behavior-change defensive fix, not a bug
- * fix for anything currently broken here. The reason: sdtest.c hit
- * real `ia16-elf-gcc -O2` assembler errors ("operand type mismatch")
- * from this exact "Nd" form once outportb/inportb actually got inlined
- * at every call site under -O2 -- this toolchain's constraint solver
- * apparently doesn't reliably resolve "Nd" once the asm block is
- * duplicated across many inlined call sites, only when it stays a
- * real, separate, un-inlined function body (which is all "Nd" has ever
- * been asked to do here, since this file has no -O2 in its Makefile
- * line). If -O2 (or anything else that would inline these) is ever
- * added to this target, this form is required to avoid the same
- * failure -- see firmware/client/sdtest.c's own copy of this comment
- * for the full story.
+ * Raw port I/O -- Borland's <dos.h> outportb()/inportb() are used
+ * directly; no inline asm needed on this toolchain. (The ia16-elf-gcc
+ * version of this file hand-rolled these with GCC inline asm because
+ * that toolchain has no built-in equivalent -- see this file's header
+ * comment.)
  * ------------------------------------------------------------------- */
-
-static inline void outportb(unsigned port, unsigned char value) {
-    __asm__ volatile ("outb %%al, %%dx" : : "a"(value), "d"(port));
-}
-
-static inline unsigned char inportb(unsigned port) {
-    unsigned char ret;
-    __asm__ volatile ("inb %%dx, %%al" : "=a"(ret) : "d"(port));
-    return ret;
-}
 
 /* ---------------------------------------------------------------------
  * Control register bit assignments -- doc sec 2's host-side inversion
@@ -116,9 +114,9 @@ static inline unsigned char inportb(unsigned port) {
 /* Device-side dispatch command byte -- must match
  * trinket_ifacetest/src/dispatch.h's DISPATCH_CMD_TEST_HARNESS exactly.
  * Two separate translation units on two separate toolchains (this one,
- * ia16-elf-gcc; the trinket's, arm-none-eabi-gcc via the Pico SDK), so
- * there's no shared header to enforce this -- keep the numeric value in
- * sync by hand if either side's dispatch command list changes. Same
+ * Borland C++ 3.1; the trinket's, arm-none-eabi-gcc via the Pico SDK),
+ * so there's no shared header to enforce this -- keep the numeric value
+ * in sync by hand if either side's dispatch command list changes. Same
  * constant driver/backend.c's DISPATCH_CMD_TEST_HARNESS defines
  * independently for the same reason. */
 #define DISPATCH_CMD_TEST_HARNESS  0x01u

@@ -14,13 +14,16 @@ cmake -S "$FIRMWARE_DIR" -B "$BUILD_DIR" \
     -DPICO_SDK_PATH="$SDK_PATH" \
     -DPICO_BOARD="$BOARD"
 cmake --build "$BUILD_DIR" -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || printf '1')"
-cd "$FIRMWARE_DIR/client" && make
 cd "$ROOT_DIR"
 mkdir -p "$DIST_DIR"
 cp "$BUILD_DIR/trinket_sd.uf2" "$DIST_DIR/trinket_sd.uf2"
-cp "$FIRMWARE_DIR/client/SDTEST.EXE" "$DIST_DIR/"
-cp "$FIRMWARE_DIR/client/IFTEST.EXE" "$DIST_DIR/"
 
 printf '\nBuilt firmware: %s\n' "$DIST_DIR/trinket_sd.uf2"
-printf 'Built client: %s\n' "$DIST_DIR/SDTEST.EXE"
-printf 'Built client: %s\n' "$DIST_DIR/IFTEST.EXE"
+
+# The DOS-side diagnostic clients (SDTEST.EXE/IFTEST.EXE, firmware/client/)
+# used to build here too, via ia16-elf-gcc. As of 2026-09-08 they build
+# via Borland C++ 3.1 under dosbox instead -- see build-client.sh and
+# TOOLCHAIN.md for why (ia16-elf-gcc has no viable fresh-sandbox install
+# path; BC31 is already vendored, proven, and now this project's one DOS
+# toolchain). Run build-client.sh (or build.sh, which runs both) to get
+# them.

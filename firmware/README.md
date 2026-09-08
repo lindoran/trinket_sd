@@ -14,8 +14,8 @@ This directory is intentionally separate from the DOS driver code in `../src/` b
 The firmware repo includes three convenience scripts at the top level:
 
 - `setup-firmware.sh`: ensures the Pico SDK, ARM toolchain, and `picotool` are available under `~/.pico-sdk` and links the installed tools into the expected locations. This is the bootstrap step if the SDK/toolchain is not already installed.
-- `build-firmware.sh`: runs the setup step, configures CMake for the firmware tree, builds the RP2040 firmware, and also builds the host-side client tools in `firmware/client` via `make`.
-- `clean-firmware.sh`: removes the generated `firmware/build` directory and runs `make clean` for the client tools.
+- `build-firmware.sh`: runs the setup step, configures CMake for the firmware tree, and builds the RP2040 firmware. (The host-side client tools in `firmware/client` build separately now, via `build-client.sh` at the repo root -- Borland C++ 3.1 under dosbox, not part of this firmware toolchain. See the top-level TOOLCHAIN.md.)
+- `clean-firmware.sh`: removes the generated `firmware/build` directory.
 
 Typical flow:
 
@@ -24,7 +24,14 @@ Typical flow:
 ./build-firmware.sh
 ```
 
-The normal output is a UF2 image under `firmware/build/` plus the host-side client binaries in `firmware/client`.
+The normal output is a UF2 image under `firmware/build/`. For the
+host-side client binaries (`SDTEST.EXE`/`IFTEST.EXE`), run the
+repo-root `build-client.sh` instead.
+
+under linux, you can manually build the whole repo with a full chain 
+using `make` and `make clean`.  This performs as expected, and runs
+the correct scripts.  You can also do `make package` to zip the 
+deliverables.
 
 ---
 
@@ -39,7 +46,7 @@ has moved the SD logic onto the Pico itself.
   outputs at a known idle state, waits for the line release, then clears
   per-subsystem state before the main loop resumes. This is the same
   protocol reset pattern the host-side `host_reset()` in `client/*` uses.
-- `client/ifacetest.c` and `client/sdtest.c` both call `host_reset()` at
+- `client/iftest.c` and `client/sdtest.c` both call `host_reset()` at
   the start of a standalone run to ensure a known starting state.
 - The Pico firmware is now a real command dispatcher built around
   `src/dispatch.c` / `src/dispatch.h`, with a test-harness subsystem and

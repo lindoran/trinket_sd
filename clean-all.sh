@@ -7,6 +7,7 @@ ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 "$ROOT_DIR/clean-firmware.sh"
 "$ROOT_DIR/clean-driver.sh"
+"$ROOT_DIR/clean-client.sh"
 rm -f -- \
     "$ROOT_DIR/dist/trinket_sd.tar.gz" \
     "$ROOT_DIR/dist/trinket_sd.7z" \

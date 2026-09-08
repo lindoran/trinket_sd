@@ -6,9 +6,9 @@
 ROOT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PACKAGE_BASENAME := trinket_sd
 PACKAGE_DIR := $(ROOT_DIR)/dist
-PACKAGE_FILES := TRINKET.SYS SDTEST.EXE IFTEST.EXE
+PACKAGE_FILES := TRINKET.SYS SDTEST.EXE IFTEST.EXE trinket_sd.uf2
 
-.PHONY: all build package toolchain check-toolchain setup setup-firmware firmware build-firmware client driver build-driver clean clean-all clean-firmware clean-driver help
+.PHONY: all build package toolchain check-toolchain setup setup-firmware firmware build-firmware client build-client driver build-driver clean clean-all clean-firmware clean-driver clean-client help
 
 all: build
 
@@ -41,7 +41,9 @@ firmware:
 build-firmware: firmware
 
 client:
-	@$(MAKE) -C "$(ROOT_DIR)/firmware/client"
+	@"$(ROOT_DIR)/build-client.sh"
+
+build-client: client
 
 driver:
 	@"$(ROOT_DIR)/build-driver.sh"
@@ -59,22 +61,26 @@ clean-firmware:
 clean-driver:
 	@"$(ROOT_DIR)/clean-driver.sh"
 
+clean-client:
+	@"$(ROOT_DIR)/clean-client.sh"
+
 help:
 	@printf '%s\n' \
 		'Usage: make [target]' \
 		'' \
 		'Build targets:' \
-		'  all, build       Build firmware, client tools, and DOS driver' \
+		'  all, build       Build firmware, DOS driver, and DOS client tools' \
 		'  package          Build everything and create .tar.gz, .7z, and .zip archives' \
 		'  toolchain        Check dependencies and print setup suggestions' \
 		'  setup            Install or link firmware build dependencies' \
-		'  firmware         Build firmware and client tools' \
-		'  client           Build only the DOS client tools' \
-		'  driver           Build only the DOS driver' \
-		'  setup-firmware, build-firmware, build-driver' \
+		'  firmware         Build RP2040 firmware only' \
+		'  client           Build only the DOS client tools (Borland C++ 3.1 + dosbox)' \
+		'  driver           Build only the DOS driver (Borland C++ 3.1 + dosbox)' \
+		'  setup-firmware, build-firmware, build-client, build-driver' \
 		'                   Script-name aliases for the targets above' \
 		'' \
 		'Clean targets:' \
 		'  clean, clean-all  Remove all generated build artifacts' \
-		'  clean-firmware    Remove firmware and client artifacts' \
-		'  clean-driver      Remove the DOS driver artifact'
+		'  clean-firmware    Remove firmware artifacts' \
+		'  clean-driver      Remove the DOS driver artifact' \
+		'  clean-client      Remove the DOS client tool artifacts'

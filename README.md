@@ -31,28 +31,33 @@ intentionally paused (see that section).
 
 ## Repo layout
 
-Two separate toolchains and code paths live here, sharing a wire
-protocol but never built together:
+Two separate toolchains and code paths live here, sharing wire
+protocols but never built together:
 
 - **`src/`** -- the real-mode Borland C++ 3.1/Turbo Assembler driver
   that produces `TRINKET.SYS` for a DOS-era machine.
 - **`firmware/`** -- the RP2040 side: a CMake/Pico-SDK project
-  (`firmware/src/`) plus DOS-side diagnostic client tools built with
-  ia16-elf-gcc (`firmware/client/`, e.g. `sdtest.c`'s `fastinit`/
-  `fastread`/`fastbench`/`fastcheck` commands -- the standalone way to
-  exercise the RP2040 side without the driver in the loop at all).
+  (`firmware/src/`) plus DOS-side diagnostic client tools
+  (`firmware/client/`, e.g. `sdtest.c`'s `fastinit`/`fastread`/
+  `fastbench`/`fastcheck` commands -- the standalone way to exercise the
+  RP2040 side without the driver in the loop at all). The client tools
+  build with the same Borland C++ 3.1 toolchain as `src/` (as of
+  2026-09-08 -- they used to be a third, ia16-elf-gcc toolchain; see
+  TOOLCHAIN.md for why that changed), so this project has two toolchains
+  total, not three: arm-none-eabi-gcc for `firmware/src/`, Borland C++
+  3.1 for everything DOS-side (`src/` and `firmware/client/` alike).
 
 See [firmware/README.md](./firmware/README.md) for the firmware side in
 its own detail, and **[TOOLCHAIN.md](./TOOLCHAIN.md) for the full,
 current build-environment story** -- what each toolchain actually needs,
-what reproduces in a fresh sandbox and what doesn't, and two real
-hazards specific to compiling this driver that a clean build alone won't
-catch. Both are referenced throughout this file rather than duplicated.
+what reproduces in a fresh sandbox and what doesn't, and the real
+hazards and build-system gotchas a clean build alone won't catch. Both
+are referenced throughout this file rather than duplicated.
 
 ## Building
 
 ```
-./build.sh            # builds firmware + client tools + driver, -> dist/
+./build.sh            # builds firmware + DOS driver + DOS client tools, -> dist/
 ./clean-all.sh
 ./check-toolchain.sh  # check to see if the build depends exist.
 
@@ -61,28 +66,29 @@ catch. Both are referenced throughout this file rather than duplicated.
 The same build chain is available through the top-level `Makefile`:
 
 ```
-make                  # build firmware, client tools, and DOS driver
+make                  # build firmware, DOS driver, and DOS client tools
 make package          # build everything and create .tar.gz, .7z, and .zip archives
 make toolchain        # check all build/package dependencies
-make firmware         # build firmware and client tools
-make client           # build only the DOS client tools
-make driver           # build only the DOS driver
+make firmware         # build RP2040 firmware only
+make client           # build only the DOS client tools (Borland C++ 3.1 + dosbox)
+make driver           # build only the DOS driver (Borland C++ 3.1 + dosbox)
 make setup            # install or link firmware build dependencies
 make clean            # remove all generated artifacts
 make help             # list all targets
 ```
 
-Or individually: `build-firmware.sh`/`clean-firmware.sh` (RP2040 +
-client tools) and `build-driver.sh`/`clean-driver.sh` (the DOS driver,
-via dosbox + the vendored Borland toolchain -- no dosemu2 needed). All
-four leave their output in `dist/`.
+Or individually: `build-firmware.sh`/`clean-firmware.sh` (RP2040 only),
+`build-driver.sh`/`clean-driver.sh` (the DOS driver), and
+`build-client.sh`/`clean-client.sh` (the DOS client tools) -- the latter
+two both via dosbox + the vendored Borland toolchain, no dosemu2 needed.
+All six leave their output in `dist/`.
 
 **One thing you must supply yourself**: `legacy/bc31/` (Borland C++
 3.1) is gitignored on purpose -- it's proprietary software this repo
 has no right to redistribute, so a plain clone/zip export will never
-include it. `build-driver.sh` fails with a clear message explaining
-this if it's missing; see TOOLCHAIN.md for exactly what needs to be
-there.
+include it. `build-driver.sh` and `build-client.sh` both fail with a
+clear message explaining this if it's missing; see TOOLCHAIN.md for
+exactly what needs to be there.
 
 ## Where each piece came from
 

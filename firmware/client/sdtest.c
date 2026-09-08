@@ -1,15 +1,17 @@
 /*
  * sdtest.c -- standalone SD-over-SPI-over-trinket diagnostic, built for
- * ia16-elf-gcc. Same relationship to the SPI/FAT16 work that
- * ifacetest.c has to the wire protocol: a plain, non-resident .EXE that
- * bypasses TRINKET.SYS entirely and talks straight to the parallel
- * port, so the edit-run loop while debugging SD command sequencing and
- * FAT16 parsing doesn't involve a driver, a TSR, or a reboot -- just
- * rebuild and rerun. This is deliberately step 1 of the block-device
- * work (see README.md's roadmap): prove SD bring-up + sector I/O +
- * FAT16 parsing here first, THEN move the proven logic into the
- * INT 2Fh redirector TSR. Nothing in this file is resident or hooks
- * any interrupt vector.
+ * Borland C++ 3.1 (small model). Same relationship to the SPI/FAT16
+ * work that ifacetest.c has to the wire protocol: a plain, non-resident
+ * .EXE that bypasses TRINKET.SYS entirely and talks straight to the
+ * parallel port, so the edit-run loop while debugging SD command
+ * sequencing and FAT16 parsing doesn't involve a driver, a TSR, or a
+ * reboot -- just rebuild and rerun. This is deliberately step 1 of the
+ * block-device work (see README.md's roadmap): prove SD bring-up +
+ * sector I/O + FAT16 parsing here first, THEN move the proven logic
+ * into the INT 2Fh redirector TSR (superseded in practice by
+ * TRINKET.SYS's own CONFIG.SYS block-device approach -- see
+ * TOOLCHAIN.md/the areas notes for current architecture). Nothing in
+ * this file is resident or hooks any interrupt vector.
  *
  * Talks to trinket's DISPATCH_CMD_SPI subsystem (src/subsys_spi.h) the
  * same way ifacetest.c talks to DISPATCH_CMD_TEST_HARNESS: raw port
@@ -28,44 +30,69 @@
  * port-I/O idiom underneath it.
  *
  * KNOWN PERFORMANCE LIMITATION, worth flagging before this logic moves
- * into the TSR: every single SPI byte here costs two full top-level
- * dispatch cycles over the parallel link (one Write for SPI_OP_XFER,
- * one Read to fetch the result -- see spi_byte()/spi_xfer()). Busy-wait
- * polling loops (sd_write_block()'s program-busy wait especially, which
- * can legitimately take a card up to a couple hundred milliseconds)
- * inherit that overhead directly. Fine for a diagnostic run once in a
- * while; likely worth a batched "poll N bytes, tell me which one
- * stopped being 0xFF" SPI op if/when this needs to be fast inside the
- * TSR.
+ * into a TSR (or gets superseded by more of it moving onto the RP2040
+ * side, as DISPATCH_CMD_SD/Section 2b below already has for the `fast*`
+ * commands): every single SPI byte in Sections 2/3 costs two full
+ * top-level dispatch cycles over the parallel link (one Write for
+ * SPI_OP_XFER, one Read to fetch the result -- see spi_byte()/
+ * spi_xfer()). Busy-wait polling loops (sd_write_block()'s program-busy
+ * wait especially, which can legitimately take a card up to a couple
+ * hundred milliseconds) inherit that overhead directly.
  *
- * UNTESTED / UNBUILT: written by inspection only, same status
- * everything in this project carries before its first real build (see
- * README.md, driver/NOTES.md). No ia16-elf-gcc in the sandbox this was
- * written in -- the port-I/O and dispatch layers were checked by direct
- * comparison against ifacetest.c/backend.c's already-established
- * shapes; the SD-command and FAT16 layers were checked by compiling as
- * ordinary portable C against a stubbed-out port-I/O layer on the host
- * (catches type/logic bugs, proves nothing about real SD-card timing or
- * DOS-side memory-model correctness). Build it, then run it against
- * ifacetest.c's already-hardware-confirmed transport before trusting
- * any of the SD-specific logic.
+ * PORTED FROM ia16-elf-gcc (2026-09-08): this project's DOS toolchain is
+ * moving to Borland C++ 3.1 across the board -- ia16-elf-gcc has no
+ * viable fresh-sandbox install path (see TOOLCHAIN.md), while BC31 is
+ * already vendored, already proven end-to-end (TRINKET.SYS, real
+ * hardware, Wolf3D milestone) and already has a working headless
+ * dosbox build script. Two changes of substance from the ia16-elf-gcc
+ * version, both replacing GCC inline asm this toolchain doesn't use:
+ *   - outportb()/inportb() (Section 1) now come from Borland's <dos.h>
+ *     instead of hand-rolled GCC inline asm -- no behavior change, same
+ *     single IN/OUT instruction either way.
+ *   - bios_ticks() (Section 5b) now goes through Borland's int86()
+ *     instead of a raw `int $0x1a` GCC asm block -- same INT 1Ah AH=00h
+ *     call, same CX:DX tick count / AL midnight-flag semantics.
+ * Everything else -- handshake sequencing, the SPI/SD dispatch framing,
+ * the SD command layer, FAT16 parsing, all command handlers -- is
+ * unchanged C. On this project's two established BC31 hazards (see
+ * TOOLCHAIN.md/the driver notes): this file has no far pointers at all
+ * (g_tx_buf/g_cmd_buf/g_sector are static buffers this program owns
+ * outright, never DOS-supplied far pointers crossing a segment it
+ * doesn't control, which is what that hazard is actually about), so
+ * that one doesn't apply here. It DOES do plenty of `unsigned long`
+ * shift/multiply arithmetic (LBA math, sd2_write_sectors()'s
+ * count*512ul, bios_ticks()'s tick math) -- the known BC31 DWORD-shift
+ * crash (cs.lib's N_LXLSH@/N_LXURSH@ faulting) was specific to
+ * TRINKET.SYS's STRATEGY/INTERRUPT-invoked private-stack calling
+ * context, which a plain .EXE with a normal C startup (this file) never
+ * enters, so it was never expected to apply here. Checked, not just
+ * reasoned through (2026-09-08): `bcc -S` on this file shows
+ * N_LXLSH@/N_LXURSH@/N_LXMUL@ genuinely get called, from
+ * sd2_read_sectors/sd2_write_sectors/sd_cmd/sd_arg_for_lba/rd_u32/
+ * fat16_mount/fat16_cluster_lba/fat16_next_cluster/cmd_bench/
+ * cmd_fastbench -- and the generated code around every call site is a
+ * completely ordinary `push bp / mov bp,sp` frame with BP-relative
+ * locals, ordinary near calls, nothing resembling a private stack. A
+ * standalone harness reproducing the exact same shift/multiply/div
+ * patterns, built the same way (-ms), actually RAN under dosbox (not
+ * just compiled) and returned correct results for all of them, no
+ * crash. Residual gap: that's dosbox's 8086-compatible CPU emulation,
+ * not a period-real chip -- about as close as this sandbox can get
+ * without real hardware, and this class of operation (integer
+ * shift/multiply/call/ret, no timing- or peripheral-sensitive
+ * behavior) is exactly where emulator fidelity is least likely to
+ * diverge, but it's not a substitute for an actual hardware run.
  *
- * fastinit/fastread/fastwrite/fastbench (Section 2b/5c) ARE built and
- * hardware-confirmed as of this note -- fastbench measured ~17ms/block
- * against bench's ~23ms/block on real hardware, see subsys_sd.h and
- * this project's own notes for that comparison and why the gap isn't
- * bigger. raw_recv_bulk() (Section 1, ENHANCEMENTS.md point 4) and the
- * Makefile's -O2 for this target are NOT yet re-tested against that
- * same fastbench number -- written the same "checked by inspection,
- * matches the pre-existing per-byte logic exactly" way the rest of
- * this paragraph describes, still needs a real rebuild + rerun to see
- * whether either actually moves it. Also not yet re-tested since the
- * g_tx_buf/g_cmd_buf stack-to-static conversion below (real fix for a
- * real stack-overflow-class bug hit on hardware, same pattern as
- * TRINKET.C's own first bug -- see this project's notes): that
- * conversion and this file's point-4 work don't touch the same
- * functions, but both need a fresh build+run before either is trusted
- * together with the other.
+ * fastinit/fastread/fastwrite/fastbench/fastcheck (Section 2b/5c) were
+ * hardware-confirmed under ia16-elf-gcc before this port (fastbench
+ * measured ~17ms/block against bench's ~23ms/block -- see this
+ * project's notes). That confirmation was of the wire protocol and
+ * firmware side, which this port doesn't touch; the client-side C is
+ * carried over logic-for-logic. Genuinely UNTESTED under BC31 though --
+ * only compiled clean via the vendored bcc/headless dosbox so far (see
+ * TOOLCHAIN.md). Build and rerun against real hardware, starting with
+ * `fastcheck`/`fastinit` (cheapest, most diagnostic if something's
+ * wrong) before trusting the rest.
  *
  * Usage:
  *   SDTEST.EXE <command> [args] [/P=xxxx]
@@ -103,17 +130,26 @@
  *                             cost from DOS's own FAT-walk and the
  *                             resident driver's dispatch path -- see
  *                             this command's own comment below.
+ *     fastinit/fastcheck/fastread LBA [COUNT]/fastwrite LBA -y/
+ *     fastbench [COUNT] [LBA]
+ *                             DISPATCH_CMD_SD equivalents of the above
+ *                             card-only commands -- see Section 2b/5c.
  *
  * Exit codes: 0 success, 1 SD/SPI-layer failure (card didn't respond,
  * bad token, timeout -- see stderr message for which), 2 FAT16-layer
  * failure (no FAT16 volume found, file not found), 3 command-line
  * usage error.
+ *
+ * Build:
+ *   bcc -ms -oSDTEST.EXE sdtest.c
+ * (see firmware/client/MAKEFILE.)
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <dos.h>
 
 /* ===================================================================
  * Section 1: raw port I/O + wire-level handshakes.
@@ -122,38 +158,15 @@
  * meanings, io_delay, host_reset, wait_error_high/low,
  * host_select_direction) -- see that file's header comment for the
  * doc-section references these implement. Duplicated rather than
- * shared because there is still no shared header between ia16-elf-gcc
- * translation units in this project (see dispatch.h's namespace note)
- * and this file has no dependency on ifacetest.c beyond "happens to
- * need the same primitives."
+ * shared because there is still no shared header between this
+ * project's DOS-side translation units (see dispatch.h's namespace
+ * note) and this file has no dependency on ifacetest.c beyond
+ * "happens to need the same primitives."
  *
- * outportb/inportb are the one deliberate exception, not line-for-line
- * with ifacetest.c: this file hit real `ia16-elf-gcc -O2` assembler
- * errors ("operand type mismatch for `in'/`out'") from ifacetest.c's
- * original "Nd" (immediate-or-DX) constraint form once outportb/
- * inportb actually got inlined at every call site -- confirmed via
- * disassembly that ifacetest.c's own "Nd" form only ever compiles
- * clean because it's built without -O2, so outportb/inportb stay real,
- * separate, un-inlined `call`s there; the constraint is never actually
- * resolved in an inlined context on this toolchain. This file forces
- * the "d" (DX-only) alternative instead, confirmed via disassembly to
- * still generate real outb/inb against the real port value, with
- * io_delay()'s four dummy reads and every polling loop intact -- see
- * this project's own notes for the disassembly that confirmed this.
- * ifacetest.c's "Nd" form is fine as-is only because it's never built
- * with -O2 or anything else that would inline it; if that ever
- * changes, it needs this same fix first.
+ * outportb()/inportb() come straight from Borland's <dos.h> -- no
+ * inline asm anywhere in this file (see this file's header comment for
+ * what the ia16-elf-gcc version had to do instead, and why).
  * =================================================================== */
-
-static inline void outportb(unsigned port, unsigned char value) {
-    __asm__ volatile ("outb %%al, %%dx" : : "a"(value), "d"(port));
-}
-
-static inline unsigned char inportb(unsigned port) {
-    unsigned char ret;
-    __asm__ volatile ("inb %%dx, %%al" : "=a"(ret) : "d"(port));
-    return ret;
-}
 
 #define CTRL_STROBE_SELECT_LOW   0x01u
 #define CTRL_STROBE_SELECT_HIGH  0x00u
@@ -173,6 +186,7 @@ static inline unsigned char inportb(unsigned port) {
 #define REG_STATUS   1
 #define REG_CONTROL  2
 
+#define DISPATCH_CMD_TEST_HARNESS  0x01u
 #define POLL_TIMEOUT_ITERS  60000UL
 
 static unsigned base_port;
@@ -292,27 +306,8 @@ static int raw_recv_byte(unsigned char *out) {
 /* Bulk nibble read -- reads `count` bytes via the exact same per-byte
  * protocol as raw_recv_byte() above (copied verbatim: same 2 nibbles,
  * same full Init/Error handshake each, same bit patterns), as ONE
- * loop instead of `count` separate function calls. This is
- * ENHANCEMENTS.md point 4's "unrolled bulk nibble stream", in plain C
- * rather than hand-written inline assembly -- deliberately: there is
- * still no path to real ia16-elf-gcc/DOS/RP2040 hardware in the
- * environment this was written in (see this file's UNTESTED header
- * note), and hand-rolled asm that's subtly wrong in some register-
- * clobbering way is both easier to get wrong and harder to catch by
- * inspection than equivalent C -- the g_tx_buf/g_cmd_buf stack-to-
- * static fix elsewhere in this file is exactly this project's own
- * evidence that this file's logic needs a real build (and real
- * hardware) to fully trust, and asm raises that bar further, not
- * lowers it. Try adding -O2 to the Makefile's CFLAGS before reaching
- * for asm at all: this file's outportb/inportb/io_delay/ctrl_out are
- * all declared `static inline`, which plain GCC only honors above
- * -O0 -- at an un-optimized build, EVERY one of those is a real
- * CALL/RET, not the register-resident couple-of-instructions
- * ENHANCEMENTS.md's point 4 is describing. -O2 may already close most
- * of the gap this function is chasing, with none of hand-written
- * asm's risk; if a real build shows it doesn't, hand-written asm is a
- * reasonable next experiment -- but run that against real hardware,
- * not from here.
+ * loop instead of `count` separate function calls (ENHANCEMENTS.md
+ * point 4's "unrolled bulk nibble stream", in plain C).
  *
  * buf may be NULL (discard -- see cmd_fastbench()'s use via
  * sd2_get_result()'s buf==NULL/bufcap==0 path): every byte is still
@@ -412,25 +407,7 @@ static int dispatch_send_spi_op(unsigned char opcode,
  * own oversize handling does -- bytes beyond bufcap are still read off
  * the wire (to stay in lockstep) but dropped, so bufcap should normally
  * just be sizeof(your buffer) and large enough for whatever request
- * produced this result.
- *
- * RESOLVED (see docs/CODEGEN_NOTES.md): a real-hardware run showed
- * every byte read back here consistently XORed with 0x88 (status 0x00
- * arrived as 0x88, a length of 6 arrived as 0x8E, etc.) -- traced to
- * subsys_spi.c's device-side sender never applying the `^0x88 // doc
- * sec 7` correction that subsys_testharness_run() already does for
- * every Read-direction byte. That correction turned out to be a wire-
- * protocol requirement for the nibble-read mechanism itself, not
- * something specific to the test harness's own data as this file
- * originally assumed. Fixed on the firmware side (subsys_spi.c's
- * send_next_byte()) -- nothing needs to change here, since this
- * function was always doing pure raw reconstruction with no
- * correction of its own, same as ifacetest.c/backend.c's read paths
- * already do; the device is now expected to hand back the real value
- * directly. Requires a firmware rebuild + reflash to take effect,
- * not just a client rebuild. The -v trace below stays -- it's what
- * caught this and is worth keeping for the next thing that looks like
- * it. */
+ * produced this result. */
 static int spi_get_result(unsigned char *out_status, unsigned char *buf,
                            unsigned bufcap, unsigned *out_len) {
     unsigned char status, len_lo, len_hi, b;
@@ -528,7 +505,7 @@ static unsigned char spi_byte(unsigned char tx_byte) {
 }
 
 /* ===================================================================
- * Section 2b: DISPATCH_CMD_SD sub-protocol -- the new high-level SD
+ * Section 2b: DISPATCH_CMD_SD sub-protocol -- the high-level SD
  * dispatch (ENHANCEMENTS.md point 1, src/subsys_sd.h). Mirrors that
  * file's framing exactly, same "no shared header across toolchains,
  * values must match by hand" caveat as Section 2 above.
@@ -552,7 +529,11 @@ static unsigned char spi_byte(unsigned char tx_byte) {
 #define SD_STATUS_OK     0x00u
 #define SD_STATUS_ERROR  0x01u
 
-#define SD_MAX_SECTORS  60u   /* 60 sectors * 512 = 30KB, fits within 16-bit GCC 32KB limit */
+#define SD_MAX_SECTORS  60u   /* 60 sectors * 512 = 30KB -- comfortably
+                                * inside BC31 small model's 64KB DGROUP
+                                * too, same headroom rationale as the
+                                * ia16-elf-gcc 32KB-limit comment this
+                                * constant originally carried. */
 
 /* Fetches the result of the most recently completed SD_OP_* (see
  * subsys_sd.h's Read-direction framing: status, is_v2, block_addressed,
@@ -1257,19 +1238,18 @@ static int cmd_writesector(unsigned long lba, int confirmed) {
  * elapsed figure below is wrong -- flagged rather than silently
  * trusted, since this runs standalone with no reason to assume a
  * time-of-day scheduler around it.
+ *
+ * Goes through Borland's int86() rather than a raw `int $0x1a` asm
+ * block (see this file's header comment) -- same call, same register
+ * contract: AH=0 in, CX:DX=tick count / AL=midnight flag out. *
  * =================================================================== */
 
 static unsigned long bios_ticks(unsigned char *midnight_flag) {
-    unsigned short ax = 0x0000u;   /* AH=0x00 (read clock) in, AL=midnight flag out */
-    unsigned short cx, dx;
-    __asm__ volatile (
-        "int $0x1a"
-        : "+a"(ax), "=c"(cx), "=d"(dx)
-        :
-        : "cc"
-    );
-    if (midnight_flag) *midnight_flag = (unsigned char)(ax & 0xFFu);
-    return ((unsigned long)cx << 16) | dx;
+    union REGS regs;
+    regs.h.ah = 0x00;
+    int86(0x1A, &regs, &regs);
+    if (midnight_flag) *midnight_flag = regs.h.al;
+    return ((unsigned long)regs.x.cx << 16) | regs.x.dx;
 }
 
 static int cmd_bench(unsigned long lba, unsigned count) {
@@ -1402,10 +1382,7 @@ static int cmd_fastwrite(unsigned long lba, int confirmed) {
  * inside each of its `count` separate sd_read_block() calls; this
  * issues ONE SD_OP_READ_SECTORS request for all `count` sectors and
  * gets ONE response back, with all `count` CMD17s happening on the
- * RP2040 side with no parallel-link traffic in between. If
- * ENHANCEMENTS.md point 1's "eliminates ~90% of parallel-port
- * handshake traffic" estimate holds, this should land well under
- * cmd_bench()'s ~22ms/block. */
+ * RP2040 side with no parallel-link traffic in between. */
 static int cmd_fastbench(unsigned long lba, unsigned count) {
     unsigned long t0, t1, elapsed_ticks, elapsed_ms;
     unsigned char midnight;
