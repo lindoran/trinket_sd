@@ -83,6 +83,7 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "pico/stdio.h"
+#include "hardware/clocks.h"
 
 #include "debug.h"
 #include "wire.h"
@@ -91,30 +92,74 @@
 #include "subsys_testharness.h"
 #include "subsys_spi.h"
 #include "subsys_sd.h"
+#include "subsys_dac.h"
 
 #define KEY_ESC  0x1Bu
 
-// Non-blocking check for an ESC keypress on the USB CDC console,
-// toggling the firmware's USB-CDC debug logging. Deliberately polled only
-// here, once per main-loop iteration between dispatch cycles -- NOT
-// from inside wire.c's wire_wait_init_high()/wait loops, which are
-// the timing-critical path every byte handshake goes through and
-// stay exactly as confirmed-on-hardware. Practical effect: this only
-// takes the keypress between top-level dispatch cycles, so toggle it
-// at the DOS prompt before/after the operation you're timing, not
-// expecting it to interrupt one already in flight.
+// Non-blocking check for an ESC keypress on the USB CDC console.
+// On ESC:
+//   1. Dumps full hardware diagnostics unconditionally (plain printf, always visible).
+//   2. Toggles verbose debug logging.
+//   3. Flushes the USB CDC buffer so the output appears immediately.
+//   4. Parks LPT wire outputs to their known-idle level (ERROR=0, nibbles=0).
+//   5. Resets all subsystems to a clean state, then triggers a short test beep.
+//
+// Deliberately only polled here, once per main-loop iteration between dispatch
+// cycles -- NOT from inside wire.c's blocking wait loops (the timing-critical
+// path). Practical effect: the keypress is seen between top-level dispatch
+// cycles, which is fine for a diagnostic tool (not a real-time control path).
 static void poll_debug_toggle(void) {
-    static bool debug_on = false;   // mirrors what subsys_spi.c/subsys_sd.c were last told
+    static bool debug_on = false;
 
     int c = getchar_timeout_us(0);
-    if (c == KEY_ESC) {
-        debug_on = !debug_on;
-        debug_set_enabled(debug_on);
-        activity_set_debug(debug_on);
-        subsys_spi_set_debug(debug_on);
-        subsys_sd_set_debug(debug_on);
-        debug_printf("trinket firmware: debug logging ON\n");
-    }
+    if (c != KEY_ESC) return;
+
+    // Toggle verbose debug logging.
+    debug_on = !debug_on;
+    debug_set_enabled(debug_on);
+    activity_set_debug(debug_on);
+    subsys_spi_set_debug(debug_on);
+    subsys_sd_set_debug(debug_on);
+    subsys_dac_set_debug(debug_on);
+
+    // Print full hardware diagnostics (always, regardless of debug_on).
+    printf("\n============================================================\n");
+    printf("              TRINKET HARDWARE DIAGNOSTICS                  \n");
+    printf("============================================================\n");
+    printf("  clk_sys = %lu MHz | uptime = %lu ms | debug logging: %s\n",
+           (unsigned long)(clock_get_hz(clk_sys) / 1000000u),
+           (unsigned long)to_ms_since_boot(get_absolute_time()),
+           debug_on ? "ON" : "OFF");
+    printf("------------------------------------------------------------\n");
+    wire_dump_diagnostics();
+    printf("\n");
+    subsys_sd_dump_diagnostics();
+    printf("\n");
+    subsys_dac_dump_diagnostics();
+    printf("============================================================\n");
+    printf("  Resetting all subsystems to known idle state...\n");
+
+    // Reset all subsystems to clean idle state so the next DOS command
+    // starts fresh -- same as the nAuto-LF reset path in main(), but
+    // without requiring an actual hardware reset signal from DOS.
+    subsys_testharness_reset();
+    subsys_spi_reset();
+    subsys_sd_reset();
+    subsys_dac_reset();  // clears ring buffer, cancels tone, restores silence-playing state
+
+    // Park LPT wire output lines to idle levels immediately, so the
+    // next dispatch_run_one() starts with ERROR=0 and nibbles=0.
+    wire_park_outputs();
+
+    printf("  Triggering 1000Hz 200ms test beep...\n");
+    printf("============================================================\n\n");
+
+    // Flush the USB CDC buffer NOW so everything above appears in the
+    // terminal immediately, before we go back to blocking in dispatch_run_one().
+    stdio_flush();
+
+    // Fire test beep -- plays in background via DMA, does not block.
+    subsys_dac_play_tone(1000, 200, DAC_SCLK_INTERNAL);
 }
 
 int main(void) {
@@ -123,12 +168,20 @@ int main(void) {
     wire_setup_pins();
     subsys_spi_init();       // bring up SPI0 (GPIO0-3) + CS at the safe default rate/mode
     subsys_sd_init();        // redundant hardware bring-up, same pins -- see subsys_sd.h
+    subsys_dac_init();       // bring up DAC subsystem (PIO I2S + DMA + SCLK)
     wire_setup_reset_irq();
+
+    // Startup hardware test beep (896 Hz, 200 ms) -- plays immediately on boot
+    subsys_dac_play_tone(896, 200, DAC_SCLK_INTERNAL);
 
     // Give USB CDC a moment to enumerate before the first diagnostic, purely
     // so early messages aren't lost while a terminal is still attaching.
     sleep_ms(1500);
-    debug_printf("trinket firmware: ready (dispatcher, 3 subsystems: test harness, SPI, SD)\n");
+    printf("\n\n============================================================\n");
+    printf(" trinket firmware: ready (dispatcher: harness, SPI, SD, DAC)\n");
+    printf(" Startup test beep triggered on boot (896Hz, 200ms).\n");
+    printf(" Press ESC in this console anytime for full hardware diag.\n");
+    printf("============================================================\n\n");
 
     while (true) {
         // Checked first, every iteration: covers reset asserted between
@@ -142,6 +195,7 @@ int main(void) {
             subsys_testharness_reset();
             subsys_spi_reset();
             subsys_sd_reset();
+            subsys_dac_reset();
             continue;
         }
 

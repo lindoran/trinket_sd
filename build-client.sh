@@ -41,9 +41,9 @@ fi
 # Same scratch-drive approach as build-driver.sh, same reasoning (keep
 # a failed/partial build from leaving generated files in the checkout,
 # give dosbox real host directories for its C:/D: drives). Source
-# filenames here are already DOS-8.3-safe (sdtest.c, iftest.c) -- see
-# TOOLCHAIN.md's note on why iftest.c is named that and not
-# ifacetest.c.
+# filenames here are already DOS-8.3-safe (sdtest.c, iftest.c,
+# dactest.c) -- see TOOLCHAIN.md's note on why iftest.c is named that
+# and not ifacetest.c.
 mkdir -p "$WORK_DIR/c" "$WORK_DIR/d/TEMP"
 cp -r "$BC31_DIR" "$WORK_DIR/c/BC31"
 cp "$CLIENT_DIR"/*.c "$CLIENT_DIR/MAKEFILE" "$WORK_DIR/d/"
@@ -73,13 +73,29 @@ if [ ! -f "$LOG" ] || ! grep -q BUILD_DONE_MARKER "$LOG"; then
     exit 1
 fi
 
-if grep -qE 'Error [A-Z][0-9]|Fatal|Illegal command' "$LOG"; then
-    printf 'warning: a real error/fatal marker appears in the build log:\n' >&2
+# NOTE: matches a line *starting* with "Error " -- bcc's own compile
+# errors look like "Error dactest.c 4: message" (filename right after
+# "Error ", not a catalog code), which the previous pattern here
+# ('Error [A-Z][0-9]', presumably written expecting an assembler-style
+# "Error A2081" catalog code) never actually matched. Found this the
+# hard way: this script reported a clean build while silently never
+# having checked whether DACTEST.EXE existed at all.
+#
+# The `grep -v '^Error messages:'` second stage exists because TASM's
+# own clean-build summary line is literally "Error messages:    None"
+# -- a naive '^Error ' match flags that as a failure on every driver
+# build. Filter it out, then anything starting with "Error " that's
+# left is a real one. Same two-stage check in build-driver.sh.
+if grep -E '^Error ' "$LOG" | grep -qv '^Error messages:'; then
+    printf 'warning: a real error marker appears in the build log:\n' >&2
+    cat "$LOG" >&2
+elif grep -qE 'Fatal|Illegal command' "$LOG"; then
+    printf 'warning: a real fatal/illegal-command marker appears in the build log:\n' >&2
     cat "$LOG" >&2
 fi
 
-if [ ! -f "$WORK_DIR/d/SDTEST.EXE" ] || [ ! -f "$WORK_DIR/d/IFTEST.EXE" ]; then
-    printf 'error: SDTEST.EXE and/or IFTEST.EXE were not produced. Full log:\n' >&2
+if [ ! -f "$WORK_DIR/d/SDTEST.EXE" ] || [ ! -f "$WORK_DIR/d/IFTEST.EXE" ] || [ ! -f "$WORK_DIR/d/DACTEST.EXE" ]; then
+    printf 'error: SDTEST.EXE, IFTEST.EXE, and/or DACTEST.EXE were not produced. Full log:\n' >&2
     cat "$LOG" >&2
     exit 1
 fi
@@ -87,5 +103,7 @@ fi
 mkdir -p "$DIST_DIR"
 cp "$WORK_DIR/d/SDTEST.EXE" "$DIST_DIR/SDTEST.EXE"
 cp "$WORK_DIR/d/IFTEST.EXE" "$DIST_DIR/IFTEST.EXE"
+cp "$WORK_DIR/d/DACTEST.EXE" "$DIST_DIR/DACTEST.EXE"
 printf '\nBuilt client: %s\n' "$DIST_DIR/SDTEST.EXE"
 printf 'Built client: %s\n' "$DIST_DIR/IFTEST.EXE"
+printf 'Built client: %s\n' "$DIST_DIR/DACTEST.EXE"

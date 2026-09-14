@@ -1,0 +1,72 @@
+;
+; audio_i2s.pio -- I2S audio transmitter for PCM5102 DAC on RP2040
+;
+; Pin configuration:
+;   Sideset pin 0: BCK  (Bit Clock, GPIO 16)
+;   Sideset pin 1: LRCK (Left/Right Clock / WS, GPIO 17)
+;   Out pin:       DIN  (Serial Data, GPIO 27)
+;
+; Sideset bit mapping:
+;   bit 0 (LSB): BCK
+;   bit 1 (MSB): LRCK
+;   0b00 = BCK low,  LRCK low  (Left channel)
+;   0b01 = BCK high, LRCK low  (Left channel)
+;   0b10 = BCK low,  LRCK high (Right channel)
+;   0b11 = BCK high, LRCK high (Right channel)
+;
+; Timing:
+;   Standard Philips I2S format (16-bit stereo, 32 bits per frame).
+;   LRCK transitions 1 bit clock before the MSB of each channel.
+;   Data is updated on falling edge of BCK, sampled by receiver on rising edge.
+;   Each bit takes 2 PIO clock cycles (1 low, 1 high).
+;   Total frame = 32 bits * 2 cycles/bit = 64 PIO clock cycles per stereo sample.
+;
+
+.program audio_i2s
+.side_set 2
+
+.wrap_target
+    set x, 14           side 0b01 ; 1 bit-clock delay before Left MSB (LRCK=0, BCK=1)
+left_loop:
+    out pins, 1         side 0b00 ; BCK=0, LRCK=0, output Left bit
+    jmp x--, left_loop  side 0b01 ; BCK=1, LRCK=0, clock high
+    out pins, 1         side 0b10 ; BCK=0, LRCK=1 (output Left LSB, switch LRCK to 1)
+    set x, 14           side 0b11 ; 1 bit-clock delay before Right MSB (LRCK=1, BCK=1)
+right_loop:
+    out pins, 1         side 0b10 ; BCK=0, LRCK=1, output Right bit
+    jmp x--, right_loop side 0b11 ; BCK=1, LRCK=1, clock high
+    out pins, 1         side 0b00 ; BCK=0, LRCK=0 (output Right LSB, switch LRCK to 0)
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void audio_i2s_program_init(PIO pio, uint sm, uint offset, uint data_pin, uint clock_pin_base) {
+    pio_sm_config sm_config = audio_i2s_program_get_default_config(offset);
+    
+    sm_config_set_out_pins(&sm_config, data_pin, 1);
+    sm_config_set_sideset_pins(&sm_config, clock_pin_base);
+    
+    // Autopull 32 bits from FIFO, shift left (MSB first)
+    sm_config_set_out_shift(&sm_config, false, true, 32);
+    
+    // Join FIFOs to make a single 8-word TX FIFO
+    sm_config_set_fifo_join(&sm_config, PIO_FIFO_JOIN_TX);
+
+    pio_sm_set_consecutive_pindirs(pio, sm, data_pin, 1, true);
+    pio_sm_set_consecutive_pindirs(pio, sm, clock_pin_base, 2, true);
+
+    pio_gpio_init(pio, data_pin);
+    pio_gpio_init(pio, clock_pin_base);
+    pio_gpio_init(pio, clock_pin_base + 1);
+
+    pio_sm_init(pio, sm, offset, &sm_config);
+}
+
+static inline void audio_i2s_set_sample_rate(PIO pio, uint sm, uint32_t sample_rate) {
+    // 64 PIO cycles per stereo sample (32 bit-clocks * 2 cycles/bit)
+    uint32_t pio_freq = sample_rate * 64u;
+    float div = (float)clock_get_hz(clk_sys) / (float)pio_freq;
+    pio_sm_set_clkdiv(pio, sm, div);
+}
+%}

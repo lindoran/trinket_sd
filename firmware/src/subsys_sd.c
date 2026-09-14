@@ -25,6 +25,7 @@
 
 #include "subsys_sd.h"
 
+#include <stdio.h>
 #include <stdint.h>
 
 #include "debug.h"
@@ -32,6 +33,7 @@
 #include "hardware/gpio.h"
 
 #include "wire.h"
+#include "subsys_dac.h"
 
 // ---------------------------------------------------------------------
 // Pin assignments -- same physical pins as subsys_spi.c (H3 header,
@@ -286,7 +288,13 @@ static bool sd_check_media(void) {
     r1 = sd_cmd(13, 0);
     r2 = spi_byte(0xFFu);   // read 2nd byte of R2 response so card finishes CMD13
     cs_deassert();          // deasserts CS and sends dummy clocks to release MISO
-    return !(r1 & 0x80u);
+    (void)r2;               // only used to complete the R2 transaction, not part of the check
+    // A real "card responded normally" check, not just "bit 7 clear" --
+    // CMD13's R1 byte should be exactly 0x00 for a healthy, initialized
+    // card; anything else (illegal command, CRC error, address error,
+    // etc.) should count as a failed media check even though several of
+    // those error bits don't set bit 7.
+    return r1 == 0x00u;
 }
 
 /* CMD17 READ_SINGLE_BLOCK into out[0..511]. Returns true on success. */
@@ -404,6 +412,7 @@ static bool handle_op_read_sectors(void) {
             sd_last_len = 0;
             return true;
         }
+        subsys_dac_service();
     }
 
     sd_last_status = SD_STATUS_OK;
@@ -451,6 +460,7 @@ static bool handle_op_write_sectors(void) {
             sd_last_len = 0;
             return true;
         }
+        subsys_dac_service();
     }
 
     sd_last_status = SD_STATUS_OK;
@@ -537,4 +547,20 @@ bool subsys_sd_run(void) {
         return run_write_side();
     }
     return run_read_side();
+}
+
+void subsys_sd_dump_diagnostics(void) {
+    printf("[SD / SPI Subsystem Status (SPI0 on H3 Header)]\n");
+    printf("  GPIO0 (MISO/RX):  %u (func %u)\n", gpio_get(PIN_SPI_MISO), gpio_get_function(PIN_SPI_MISO));
+    printf("  GPIO1 (CS):       %u (manual CS: %s)\n", gpio_get(PIN_SPI_CS), gpio_get(PIN_SPI_CS) ? "DEASSERTED" : "ASSERTED (active-low)");
+    printf("  GPIO2 (SCK):      %u (func %u)\n", gpio_get(PIN_SPI_SCK), gpio_get_function(PIN_SPI_SCK));
+    printf("  GPIO3 (MOSI/TX):  %u (func %u)\n", gpio_get(PIN_SPI_MOSI), gpio_get_function(PIN_SPI_MOSI));
+    printf("  Card Initialized: %s\n", sd_initialized ? "YES" : "NO");
+    if (sd_initialized) {
+        printf("  Card Specs:       %s, %s\n",
+               sd_is_v2 ? "SD v2 (or higher)" : "SD v1",
+               sd_block_addressed ? "Block-addressed (SDHC/SDXC)" : "Byte-addressed (SDSC)");
+    }
+    printf("  Last Transaction: Status=%s (0x%02X), Payload=%u bytes\n",
+           (sd_last_status == SD_STATUS_OK) ? "OK" : "ERROR", sd_last_status, (unsigned)sd_last_len);
 }

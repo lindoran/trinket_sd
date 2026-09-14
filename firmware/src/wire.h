@@ -56,9 +56,19 @@ bool wire_is_write_selected(void);
 /* Block for the next Init rising/falling edge. Both return false if
  * aborted early because wire_reset_pending() went true during the
  * wait -- callers must check the return value and unwind back to their
- * caller (ultimately main()'s loop) rather than trusting nInit's state. */
+ * caller (ultimately main()'s loop) rather than trusting nInit's state.
+ * Bounded by WIRE_TIMEOUT_US: use these for any wait that happens once
+ * a transaction is already in flight (a command byte or payload byte
+ * has already been exchanged this dispatch cycle). */
 bool wire_wait_init_high(void);
 bool wire_wait_init_low(void);
+
+/* Same as wire_wait_init_high() but never times out -- only returns
+ * false on wire_reset_pending(). Use this ONLY for the top-level "no
+ * command in flight yet" wait (dispatch_run_one()'s first call): the
+ * host can sit idle between commands for an arbitrary amount of time,
+ * so that wait must block indefinitely, not time out. */
+bool wire_wait_for_command(void);
 
 /* One full Init/Error byte-handshake cycle (doc sec 5.2), given Init is
  * already known to be high. *out is only valid if this returns true;
@@ -71,5 +81,15 @@ bool wire_finish_write_handshake(uint8_t *out);
  * between (see subsys_testharness.c). Returns false if reset_pending
  * fired mid-cycle. */
 bool wire_finish_read_cycle(uint8_t low_nibble, uint8_t high_nibble);
+
+/* Dumps current physical pin states and wire status to stdout for diagnostic purposes. */
+void wire_dump_diagnostics(void);
+
+/* Parks all Pico-side LPT output lines (ERROR, nibble outputs) to their
+ * known-idle level without blocking -- identical to what wire_do_reset_sequence()
+ * does before it waits for nAuto-LF to release, but without requiring an actual
+ * hardware reset pulse. Use this from the debug console ESC handler to bring the
+ * output side of the link to a clean state after any diagnostic/print work. */
+void wire_park_outputs(void);
 
 #endif /* TRINKET_WIRE_H */

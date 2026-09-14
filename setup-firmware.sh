@@ -38,11 +38,20 @@ fi
 
 if [ ! -x "$PICOTOOL_PATH" ]; then
     picotool=$(command -v picotool || true)
-    if [ -z "$picotool" ]; then
-        printf 'picotool is missing. Install it or put it on PATH.\n' >&2
-        exit 1
+    if [ -n "$picotool" ]; then
+        ln -sfn "$picotool" "$PICOTOOL_PATH"
+    else
+        # Not fatal: picotool isn't apt-installable on a stock Ubuntu
+        # sandbox (confirmed 2026-09-09 -- no such package), but the
+        # Pico SDK's own CMakeLists.txt (tools/CMakeLists.txt's
+        # pico_init_picotool) auto-fetches and builds picotool from
+        # source via FetchContent the first time `cmake -S firmware -B
+        # firmware/build ...` runs, if it can't find one already
+        # installed. Confirmed working end-to-end this way. Hard-
+        # failing the whole setup script here over this was blocking
+        # every firmware build in a fresh sandbox for no real reason.
+        printf 'picotool not found on PATH -- cmake will fetch and build it from source on first configure (this is expected and fine).\n'
     fi
-    ln -sfn "$picotool" "$PICOTOOL_PATH"
 fi
 
 printf 'Firmware tools are ready under %s\n' "$SDK_ROOT"

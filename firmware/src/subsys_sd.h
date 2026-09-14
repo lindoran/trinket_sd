@@ -216,4 +216,7 @@ void subsys_sd_reset(void);
  * messages, remain globally gated until debug logging is enabled. */
 void subsys_sd_set_debug(bool enabled);
 
+/* Dumps current SD and SPI0 hardware pin states and telemetry to stdout. */
+void subsys_sd_dump_diagnostics(void);
+
 #endif /* TRINKET_SUBSYS_SD_H */

@@ -6,6 +6,7 @@
 
 #include "wire.h"
 
+#include <stdio.h>
 #include "debug.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
@@ -33,6 +34,31 @@
 // context, read from main-loop context.
 // ---------------------------------------------------------------------
 static volatile bool reset_pending = false;
+
+// ---------------------------------------------------------------------
+// Transport timeout -- wire_wait_init_high/low() used to be genuinely
+// unbounded: if the host disappeared mid-handshake (client crashed,
+// timed out on its own side and gave up, cable hiccup, etc.) with
+// nothing asserting nAuto-LF, the Pico would sit in these loops
+// forever. Since dispatch_run_one() and every subsystem's multi-byte
+// handler drop back into one of these two waits between essentially
+// every byte, that meant a single bad handshake could permanently
+// strand the whole device -- no more dispatch, no ESC console
+// handling, nothing, until a hardware reset pulse arrived (which nothing
+// was left to send). See DAC_DESIGN_ITERATION_WORK.md for the
+// diagnostic trail that found this.
+//
+// Fix: bound the wait. A timeout is handled exactly like reset_pending
+// -- return false, let the caller unwind to dispatch_run_one() (or
+// straight back to main()'s loop), which then just waits fresh for the
+// next Init transition. No caller-side changes needed; every existing
+// caller already treats a false return as "unwind, don't trust the
+// pin state." timeout_count is exposed via wire_dump_diagnostics() so a
+// real stuck-transaction can be told apart from a clean idle link.
+// ---------------------------------------------------------------------
+#define WIRE_TIMEOUT_US   250000u   // 250ms -- generous vs. any real handshake step, short enough to recover quickly
+
+static volatile uint32_t timeout_count = 0;
 
 static void reset_isr(uint gpio, uint32_t events) {
     (void)events;
@@ -75,10 +101,43 @@ bool wire_is_write_selected(void) {
     return gpio_get(PIN_SELECT_IN) != 0;
 }
 
-// Both return false if aborted early because reset_pending went true --
-// callers must check the return value and unwind back to the main loop
-// rather than trusting nInit's state.
+// Both return false if aborted early because reset_pending went true, OR
+// because the host never showed up within WIRE_TIMEOUT_US -- callers
+// must check the return value and unwind back to the main loop rather
+// than trusting nInit's state. A timeout also parks our output lines
+// (ERROR + nibbles) immediately, same as the reset path, so a
+// transaction we bailed out of mid-way never leaves ERROR asserted or a
+// stale nibble on the bus for the next attempt to trip over.
 bool wire_wait_init_high(void) {
+    uint32_t start = time_us_32();
+    while (!gpio_get(PIN_INIT)) {
+        if (reset_pending) {
+            return false;
+        }
+        if (time_us_32() - start > WIRE_TIMEOUT_US) {
+            timeout_count++;
+            debug_printf("WIRE: timeout waiting for Init HIGH\n");
+            wire_park_outputs();
+            return false;
+        }
+        tight_loop_contents();
+    }
+    return true;
+}
+
+// Same wait, no timeout -- for the one call site (dispatch_run_one()'s
+// very first wait) where blocking indefinitely is correct, not a bug.
+// That wait means "no command in flight yet, host hasn't started one" --
+// the host can legitimately sit idle for seconds or minutes between
+// dactest invocations, so timing it out was wrong: it made the device
+// print a timeout and "recover" from a failure that was never
+// happening, every 250ms, for the entire time nothing was going on.
+// Every OTHER wire_wait_init_high() call happens after a transaction
+// has already started (a command byte was already read, a multi-byte
+// payload or response is already in flight) -- those genuinely can
+// strand the device if the host disappears mid-handshake, so they keep
+// the bounded version above.
+bool wire_wait_for_command(void) {
     while (!gpio_get(PIN_INIT)) {
         if (reset_pending) {
             return false;
@@ -89,8 +148,15 @@ bool wire_wait_init_high(void) {
 }
 
 bool wire_wait_init_low(void) {
+    uint32_t start = time_us_32();
     while (gpio_get(PIN_INIT)) {
         if (reset_pending) {
+            return false;
+        }
+        if (time_us_32() - start > WIRE_TIMEOUT_US) {
+            timeout_count++;
+            debug_printf("WIRE: timeout waiting for Init LOW\n");
+            wire_park_outputs();
             return false;
         }
         tight_loop_contents();
@@ -198,4 +264,35 @@ void wire_do_reset_sequence(void) {
     reset_pending = false;
 
     debug_printf("RESET: nAuto-LF released, resuming normal operation\n");
+}
+
+void wire_dump_diagnostics(void) {
+    uint8_t data_bus = read_data_bus();
+    bool strobe = gpio_get(PIN_STROBE) != 0;
+    bool reset_pin = gpio_get(PIN_RESET) != 0;
+    bool init = gpio_get(PIN_INIT) != 0;
+    bool select_in = gpio_get(PIN_SELECT_IN) != 0;
+    bool err = gpio_get(PIN_ERROR) != 0;
+
+    printf("[LPT Parallel Link Status]\n");
+    printf("  Data Bus (D0-D7, GPIO 4-11): 0x%02X\n", data_bus);
+    printf("  nSTROBE    (GPIO 12): %u (Read nibble select: %s)\n", strobe ? 1 : 0, strobe ? "HIGH" : "LOW");
+    printf("  nRESET     (GPIO 13): %u (Asserted/Pending: %s)\n", reset_pin ? 1 : 0, reset_pending ? "YES" : "NO");
+    printf("  nINIT      (GPIO 14): %u (Transfer semaphore)\n", init ? 1 : 0);
+    printf("  nSELECT_IN (GPIO 15): %u (Direction: %s)\n", select_in ? 1 : 0, select_in ? "WRITE" : "READ");
+    printf("  nERROR     (GPIO 22): %u (Device ready handshake)\n", err ? 1 : 0);
+    printf("  Nibble Out (GPIO 18-21): BUSY=%u PE=%u SEL=%u ACK=%u\n",
+           gpio_get(PIN_NIBBLE_BASE + 0), gpio_get(PIN_NIBBLE_BASE + 1),
+           gpio_get(PIN_NIBBLE_BASE + 2), gpio_get(PIN_NIBBLE_BASE + 3));
+    printf("  Transport timeouts (WIRE_TIMEOUT_US=%u): %lu\n",
+           (unsigned)WIRE_TIMEOUT_US, (unsigned long)timeout_count);
+}
+
+void wire_park_outputs(void) {
+    // Identical to the first two lines of wire_do_reset_sequence() -- park our
+    // output lines immediately without waiting for any hardware signal. Called
+    // from the ESC debug handler after diagnostic printing, so the LPT link is
+    // back at a clean level before the next dispatch_run_one() waits for Init.
+    gpio_put(PIN_ERROR, 0);
+    write_nibble(0);
 }

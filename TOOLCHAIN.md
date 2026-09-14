@@ -18,10 +18,10 @@ vendored. ia16-elf-gcc never got a working fresh-sandbox install path
 left every client-tool change "syntax-checked, never fully verified"
 until it happened to reach real hardware. BC31 has neither problem: it's
 already vendored, already proven end-to-end (TRINKET.SYS, real hardware,
-the Wolf3D milestone), and now builds `sdtest.c`/`iftest.c` too --
-confirmed via a real compile+link under the vendored `bcc`/`tlink`
-(headless dosbox), zero errors, zero warnings, on the first attempt once
-two DOS-toolchain-specific build gotchas (below) were worked out. See
+the Wolf3D milestone), and now builds `sdtest.c`/`iftest.c`/`dactest.c`
+too -- confirmed via a real compile+link under the vendored `bcc`/
+`tlink` (headless dosbox), zero errors, zero warnings, once the
+DOS-toolchain-specific build gotchas below were worked out. See
 `build-client.sh`.
 
 Quick status, as of this writing:
@@ -97,9 +97,44 @@ Makefile or adding a new DOS-side source file:**
    build; this also finally makes the source filename match the
    `IFTEST.EXE` name its own Makefile target and usage docs already
    used, which never actually agreed with `ifacetest.c`/`IFACETEST.EXE`
-   even before this port. Any future DOS-side source file (the dropped
-   `dactest.c` included, if/when that work resumes) needs an 8.3-safe
-   name from the start.
+   even before this port. Any future DOS-side source file needs an
+   8.3-safe name from the start -- `dactest.c` (7 characters) already
+   fit and needed no rename when it was ported in turn (see below).
+3. **C99 constructs are a real, separate hazard from ANSI-vs-K&R** --
+   found while porting `dactest.c`, which (unlike `sdtest.c`/`iftest.c`,
+   already written C89-clean) used `for (int i = ...)` loop-scoped
+   declarations and several mid-function declarations throughout.
+   Confirmed directly: a minimal `for (int i = 0; ...)` under `bcc`
+   fails with "Expression syntax" / "Undefined symbol 'i'" / "Statement
+   missing ;". Every declaration has to be hoisted to the top of its
+   enclosing block, C89-style -- eleven for-loops' worth in that file
+   alone. `//` line comments, by contrast, compile clean under `bcc`
+   with no changes needed -- confirmed directly too, and already the
+   convention throughout this project's hand-written BC31 driver
+   sources.
+4. **`build-driver.sh`/`build-client.sh`'s own error-detection grep was
+   silently wrong, in two different ways, both found by actually
+   triggering them while porting `dactest.c`.** First: the original
+   pattern (`'Error [A-Z][0-9]'`) assumed an assembler-style catalog
+   code and never matched `bcc`'s real compile-error format (`Error
+   dactest.c 4: message` -- filename right after "Error ", not a code),
+   so a real compile failure would have been reported as a clean build.
+   Confirmed by first fixing this to a naive `'^Error '` match, then
+   immediately hitting the second bug: TASM's own clean-build summary
+   line is *literally* `Error messages:    None`, which a naive
+   `^Error ` match flags as a failure on every single successful driver
+   build. Fixed for real with a two-stage check -- grep for lines
+   starting with `Error `, then grep those results for anything that
+   *isn't* the `Error messages:` summary line; only that combination
+   correctly passes a clean build and fails a real one. Both scripts
+   also went uncaught on a *third*, unrelated gap the same day:
+   `build-client.sh` never actually checked for `DACTEST.EXE`'s
+   existence before this file existed, so it would have reported
+   success even if `dactest.c` had failed to build at all, as long as
+   the other two targets succeeded. All three are exactly the kind of
+   thing that only surfaces by deliberately breaking a build and
+   watching whether the script actually notices -- worth remembering
+   next time a build script here "just works" on the first try.
 
 **Why not dosemu2 too?** It was mentioned early on as a possible
 fallback, but it's never actually been used or needed -- every single
@@ -132,13 +167,23 @@ pico-sdk at the exact pinned tag (`2.3.0`, with submodules) from GitHub
 if it isn't already at `~/.pico-sdk/sdk/2.3.0`, and symlinks the system
 `arm-none-eabi-gcc`/`picotool` into the layout it expects.
 
-**One real gap found while writing this**: `setup-firmware.sh` also wants
-`picotool` on PATH, and `picotool` isn't apt-installable in at least one
-sandbox tested. It turns out not to matter -- it's only used by the setup
-script's own idempotency check, not by the actual build. If you hit
-`picotool is missing`, a plain `cmake -S firmware -B firmware/build
--DPICO_SDK_PATH=... -DPICO_BOARD=pico && cmake --build firmware/build`
-produces a complete, valid `.uf2` with no picotool involved at all.
+**Real gap found and fixed (2026-09-09, while verifying a firmware code
+change hands-on for the first time)**: `setup-firmware.sh` used to hard-
+fail (`exit 1`) if `picotool` wasn't already on `PATH`, and `picotool`
+isn't apt-installable on a stock Ubuntu sandbox (confirmed: no such
+package). That hard-fail blocked `build-firmware.sh`/`build.sh`'s
+firmware stage in every sandbox session before this one -- even though
+`picotool` turns out not to actually matter for the build itself: the
+Pico SDK's own `tools/CMakeLists.txt` (`pico_init_picotool`) auto-fetches
+and builds `picotool` from source via `FetchContent` the first time
+`cmake -S firmware -B firmware/build ...` runs, if it can't find one
+already installed -- confirmed end-to-end, `firmware/build/trinket_sd.uf2`
+comes out complete and valid either way. `setup-firmware.sh` now just
+prints a note and continues instead of exiting when `picotool` is
+missing, so `build-firmware.sh`/`build.sh` no longer need the manual
+`cmake` workaround this note used to describe -- this was the one thing
+standing between "this reproduces cleanly" and "this actually did
+reproduce cleanly, verified" for the firmware target.
 
 `build-firmware.sh` no longer builds the DOS client tools as a last step
 (that moved to `build-client.sh`/BC31, 2026-09-08 -- see the next
@@ -146,23 +191,25 @@ section).
 
 ## Retired: DOS client tools on ia16-elf-gcc
 
-`firmware/client/*.c` (`sdtest.c`, the file now named `iftest.c`) used to
-target ia16-elf-gcc. That toolchain never got a working fresh-sandbox
-install path in two separate attempts -- not packaged in apt, real
-binaries only via a Launchpad PPA and GitLab releases (both outside
-typical sandbox network allowlists), and building the full
-binutils/gcc/newlib cross-toolchain from source was judged too large an
-undertaking to justify for test-client code specifically. The fallback
-(`gcc -fsyntax-only` against the file as ordinary portable C) caught real
-bugs but provably not everything: a 32KB stack buffer that silently
-violated the 16-bit tiny model's object-size limits, and an inline-asm
-operand constraint (`"Nd"`) this compiler mishandled once inlined under
-`-O2` both slipped past it and only surfaced under a real build. Every
-change made without real ia16-elf-gcc access carried a standing
-"syntax-checked, not verified" caveat as a result.
+`firmware/client/*.c` (`sdtest.c`, the file now named `iftest.c`; also
+`dactest.c`, added back into the tree and ported the same way once the
+BC31 decision below was already in place) used to target ia16-elf-gcc.
+That toolchain never got a working fresh-sandbox install path in two
+separate attempts -- not packaged in apt, real binaries only via a
+Launchpad PPA and GitLab releases (both outside typical sandbox network
+allowlists), and building the full binutils/gcc/newlib cross-toolchain
+from source was judged too large an undertaking to justify for
+test-client code specifically. The fallback (`gcc -fsyntax-only` against
+the file as ordinary portable C) caught real bugs but provably not
+everything: a 32KB stack buffer that silently violated the 16-bit tiny
+model's object-size limits, and an inline-asm operand constraint
+(`"Nd"`) this compiler mishandled once inlined under `-O2` both slipped
+past it and only surfaced under a real build. Every change made without
+real ia16-elf-gcc access carried a standing "syntax-checked, not
+verified" caveat as a result.
 
 As of 2026-09-08 these files are ported to Borland C++ 3.1 instead (see
-the toolchain-decision note and the two build gotchas at the top of this
+the toolchain-decision note and the build gotchas at the top of this
 document) -- a real compile+link is available in every sandbox that has
 `legacy/bc31/` supplied, the same as the driver, so this caveat no longer
 applies to them. The old GCC inline-asm port-I/O (`outportb`/`inportb`)
@@ -484,8 +531,8 @@ without this project's control. **Neither is expected to apply to
 `firmware/client/*.c`**: those are plain `.EXE`s with a normal C startup
 (never on a driver's private stack) and own all their buffers statically
 (never a DOS-supplied far pointer crossing a segment boundary this
-project doesn't control) -- see `iftest.c`/`sdtest.c`'s own header
-comments for that reasoning spelled out per-file.
+project doesn't control) -- see `iftest.c`/`sdtest.c`/`dactest.c`'s own
+header comments for that reasoning spelled out per-file.
 
 **Checked, not just reasoned through (2026-09-08):** `bcc -S` on
 `sdtest.c` confirms `N_LXLSH@`/`N_LXURSH@`/`N_LXMUL@` genuinely get
@@ -494,9 +541,20 @@ called (from `sd2_read_sectors`/`sd2_write_sectors`/`sd_cmd`/
 `fat16_next_cluster`/`cmd_bench`/`cmd_fastbench` -- `iftest.c` has none
 at all, no DWORD arithmetic there) -- and every call site sits inside a
 completely ordinary `push bp`/`mov bp,sp` frame with BP-relative locals,
-nothing resembling a private stack. Beyond the static check, a
-standalone harness reproducing the exact same shift/multiply/div
-patterns, built the same `-ms` way, was actually **run** under dosbox
+nothing resembling a private stack. Same check repeated for `dactest.c`
+when it was ported (same day, added back into the tree after this
+section was first written): 12 real `N_LXLSH@`/`N_LXURSH@` call sites
+(the DAC telemetry struct's byte-shuffled `sample_rate`/`underruns`/
+`frames_played` fields, and the same argument-encoding shifts
+`sdtest.c`'s SD layer uses), same ordinary calling convention confirmed
+by eye around one call site. No separate execution harness was written
+for `dactest.c` specifically -- its shift/reconstruct patterns are
+structurally identical to the ones the `sdtest.c` harness (below)
+already exercised, same compiler, same runtime helpers, same call
+shape, so that harness's result is treated as covering both. Beyond the
+static check, a standalone harness reproducing the exact same
+shift/multiply/div patterns, built the same `-ms` way, was actually
+**run** under dosbox
 (not just compiled) and returned correct results for all of them, no
 crash -- about as close to a real hardware proof as this sandbox can
 get. Residual gap: that's dosbox's 8086-compatible CPU emulation, not a

@@ -74,8 +74,23 @@ if [ ! -f "$LOG" ] || ! grep -q BUILD_DONE_MARKER "$LOG"; then
     exit 1
 fi
 
-if grep -qE 'Error [A-Z][0-9]|Fatal|Illegal command' "$LOG"; then
-    printf 'warning: a real error/fatal marker appears in the build log:\n' >&2
+# NOTE (2026-09-08): matches a line *starting* with "Error " -- bcc's
+# own compile errors look like "Error trinket.c 4: message" (filename
+# right after "Error ", not a catalog code), which the previous pattern
+# here ('Error [A-Z][0-9]') never actually matched -- found via
+# build-client.sh silently missing a real dactest.c failure this way.
+#
+# The `grep -v '^Error messages:'` second stage exists because TASM's
+# own clean-build summary line is literally "Error messages:    None"
+# -- a naive '^Error ' match flags every clean driver build as failed
+# (confirmed: this fired on the very next build after the fix above).
+# Filter that specific line out; anything else starting with "Error "
+# is real.
+if grep -E '^Error ' "$LOG" | grep -qv '^Error messages:'; then
+    printf 'warning: a real error marker appears in the build log:\n' >&2
+    cat "$LOG" >&2
+elif grep -qE 'Fatal|Illegal command' "$LOG"; then
+    printf 'warning: a real fatal/illegal-command marker appears in the build log:\n' >&2
     cat "$LOG" >&2
 fi
 

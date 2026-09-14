@@ -12,6 +12,7 @@
 #include "subsys_testharness.h"
 #include "subsys_spi.h"
 #include "subsys_sd.h"
+#include "subsys_dac.h"
 
 bool dispatch_run_one(void) {
     // A command byte's own handshake looks exactly like any other
@@ -19,7 +20,7 @@ bool dispatch_run_one(void) {
     // which direction the host selected, then run the handshake. The
     // only thing dispatch-specific here is that we require Write and
     // interpret the resulting byte as a command instead of payload.
-    if (!wire_wait_init_high()) {
+    if (!wire_wait_for_command()) {
         return false;
     }
 
@@ -55,6 +56,10 @@ bool dispatch_run_one(void) {
 
         case DISPATCH_CMD_SD:
             result = subsys_sd_run();
+            break;
+
+        case DISPATCH_CMD_DAC:
+            result = subsys_dac_run();
             break;
 
         default:

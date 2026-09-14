@@ -51,17 +51,20 @@ add_executable(trinket_sd
     src/subsys_testharness.c
     src/subsys_spi.c
     src/subsys_sd.c
+    src/subsys_dac.c
 )
 
-# hardware_spi drives the H3 header's real SPI0 peripheral for
-# subsys_spi.c (GPIO0/2/3 -- see its header comment); CS itself
-# (GPIO1) stays plain GPIO, already covered by pico_stdlib, since it's
-# driven manually rather than by the peripheral's automatic CS. No
-# hardware_pio -- still not needed, this project talks to the LPT link
-# with plain GPIO handshakes same as before.
+pico_generate_pio_header(trinket_sd ${CMAKE_CURRENT_LIST_DIR}/src/audio_i2s.pio)
+
+# hardware_spi drives the H3 header's real SPI0 peripheral for subsys_spi/sd.
+# hardware_pio + hardware_dma + hardware_pwm drive the I2S PCM5102 audio DAC on GPIO16,17,27,26.
 target_link_libraries(trinket_sd
     pico_stdlib
     hardware_spi
+    hardware_pio
+    hardware_dma
+    hardware_pwm
+    hardware_clocks
 )
 
 pico_add_extra_outputs(trinket_sd)
