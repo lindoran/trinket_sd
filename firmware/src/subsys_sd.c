@@ -360,8 +360,24 @@ static bool sd_write_one_sector(uint32_t lba, const uint8_t *in) {
     // Busy-wait: card holds MISO low while programming. Can legitimately
     // take a couple hundred ms -- see TRINKET.C's sd_write_block() for
     // the same wait, whose loop count this mirrors.
+    //
+    // 2026-09-14 fix: this used to unconditionally `return true` right
+    // after this loop, regardless of whether the card actually signaled
+    // done (a non-0x00 byte) or the loop simply exhausted all 60000
+    // iterations still seeing 0x00 (card still busy, or stuck/faulted).
+    // That meant a write taking longer than this budget to finish
+    // committing was reported to the host as a successful write. Now
+    // distinguishes the two and reports failure on a genuine timeout,
+    // instead of silently claiming success on data that might not have
+    // actually landed.
     for (i = 0; i < 60000; i++)
         if (spi_byte(0xFFu) != 0x00u) break;
+
+    if (i >= 60000) {
+        debug_printf("SD: CMD24 lba=%lu write-busy timeout, card never signaled done\n", (unsigned long)lba);
+        cs_deassert();
+        return false;
+    }
 
     cs_deassert();
     return true;

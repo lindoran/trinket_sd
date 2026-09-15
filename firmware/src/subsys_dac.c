@@ -330,8 +330,45 @@ static bool handle_op_start(void) {
     return true;
 }
 
+// Empties the ring buffer immediately, discarding any audio queued but
+// not yet played. Added 2026-09-14 -- the DOS-side Wolf3D
+// SDL_SSStopSample() fix found this the hard way: every existing
+// caller of DAC_OP_STOP wants playback to stop AND any not-yet-played
+// queued audio discarded (a retriggered sound interrupting a
+// still-playing one, or a full shutdown) -- nothing in this codebase
+// ever wanted "pause, keep the buffered audio, resume later" (STOP was
+// never called with that intent anywhere in dactest.c, WL/ID_SD.C's
+// trinket client, or this file's own subsys_dac_reset(), which already
+// zeroes ring_head/tail/count on a full protocol reset -- this just
+// makes DAC_OP_STOP consistent with that existing precedent instead of
+// being the one place that silently left stale audio queued).
+// Deliberately NOT a separate new opcode: a caller wanting today's old
+// "stop but keep buffered data for a later resume" behavior doesn't
+// exist anywhere in this tree, so a second op would add protocol
+// surface area (and a DOS-side wire round trip) for a use case nobody
+// has. If a real pause/resume need shows up later, add a distinct
+// DAC_OP_PAUSE then rather than overloading this again.
+//
+// Runs with the DMA IRQ masked: dma_channel_abort() (called by
+// dac_stop_playback() just before this) is synchronous/blocking per
+// the SDK, but an IRQ0 status bit that had already latched for a chunk
+// completing right before the abort took hold could still fire
+// dma_irq_handler() once after we return from it -- and that handler's
+// fill_dma_chunk() reads ring_tail/ring_count. Masking here means that
+// straggler (if it happens at all) just finds an empty ring and falls
+// into the existing silence/idle path in fill_dma_chunk() instead of
+// racing this reset.
+static void dac_flush_ring(void) {
+    irq_set_enabled(DMA_IRQ_0, false);
+    ring_head = 0;
+    ring_tail = 0;
+    ring_count = 0;
+    irq_set_enabled(DMA_IRQ_0, true);
+}
+
 static bool handle_op_stop(void) {
     dac_stop_playback();
+    dac_flush_ring();
     return true;
 }
 
