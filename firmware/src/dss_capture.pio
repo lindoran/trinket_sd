@@ -1,0 +1,27 @@
+;
+; dss_capture.pio -- latches D0-D7 on every rising edge of the Disney
+; Sound Source strobe.
+;
+; The DSS strobe is LPT pin 17 (nSelect-In, GPIO15 on the trinket). The
+; unit idles with pin 17 HIGH (that also powers the speaker box); a
+; program pulses it LOW for roughly 1-10 us and the D/A chip clocks the
+; data lines into its FIFO on the RISING edge. This program does the
+; same thing in hardware: wait for the pulse, then on the rising edge
+; sample the 8 data pins (GPIO4-11 = D0-D7) within a few PIO cycles --
+; the CPU never has to win a race against the host's next OUT.
+;
+; Each captured byte is autopushed into the RX FIFO (joined, 8 deep) as
+; the low 8 bits of a word. subsys_dss.c drains it.
+;
+; STROBE_GPIO must match WIRE_GPIO_SELECT_IN in wire.h; subsys_dss.c
+; has a compile-time check.
+;
+
+.program dss_capture
+.define PUBLIC STROBE_GPIO 15
+
+.wrap_target
+    wait 0 gpio STROBE_GPIO     ; strobe pulse begins (pin 17 pulled low)
+    wait 1 gpio STROBE_GPIO     ; rising edge: the DSS latches here
+    in pins, 8                  ; D0-D7 -> ISR, autopush at 8 bits
+.wrap

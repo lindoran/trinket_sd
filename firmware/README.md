@@ -1,113 +1,71 @@
-## Trinket Test Suite
-This is the foundational c only trinket firmware testing suite.
+# Firmware and DOS tools
 
----
+The RP2040 firmware (`src/`), the DOS-side diagnostic and configuration
+tools (`client/`), and host-side unit tests (`tests/`). The DOS driver lives
+in `../src/` and builds with a different toolchain; the two sides share a wire
+protocol but are never built together. For build instructions see
+[../TOOLCHAIN.md](../TOOLCHAIN.md); for using the result see
+[../README.md](../README.md).
 
-### What this is:
-This serves as two functions: first, it provides a basis for how the drivers will be written going forward in C, with linked assembly only where needed; second, it provides a test harness to validate the device behavior on real hardware.
+## Build
 
-This directory is intentionally separate from the DOS driver code in `../src/` because it targets a different runtime and toolchain. The DOS driver builds under Borland C++/Turbo Assembler for a 16-bit real-mode environment, while the firmware here builds for the RP2040 Pico using CMake and the Pico SDK. The wire protocol is shared, but the build environment, target architecture, and validation flow are not.
+From the repository root: `./build-firmware.sh` (firmware only, ->
+`dist/trinket_sd.uf2`), `./build-client.sh` (DOS tools, needs Borland C++ 3.1),
+or `./build.sh` for everything. `./clean-firmware.sh` removes
+`firmware/build/` and `dist/trinket_sd.uf2`. Flash the UF2 by holding BOOTSEL
+while connecting the Pico's USB port and copying it to the `RPI-RP2` drive.
 
----
+Host-side unit tests (no hardware, just `gcc`): `firmware/tests/run_tests.sh`
+runs the Disney Sound Source FIFO model and its configuration protocol.
 
-### Firmware build scripts
-The firmware repo includes three convenience scripts at the top level:
+## Architecture
 
-- `setup-firmware.sh`: ensures the Pico SDK, ARM toolchain, and `picotool` are available under `~/.pico-sdk` and links the installed tools into the expected locations. This is the bootstrap step if the SDK/toolchain is not already installed.
-- `build-firmware.sh`: runs the setup step, configures CMake for the firmware tree, builds the RP2040 firmware, and also builds the host-side client tools in `firmware/client` via `make`.
-- `clean-firmware.sh`: removes the generated `firmware/build` directory and runs `make clean` for the client tools.
+**Wire protocol and dispatch.** The PC and the trinket talk over the SPP
+parallel port using a byte handshake: writes (PC to trinket) move one byte per
+handshake, reads (trinket to PC) move a nibble per handshake, so reads cost
+about twice the handshakes per byte. `wire.c` is that layer; `dispatch.c`
+reads a command byte and hands the transaction to a subsystem. Each operation
+is two phases: a write-direction cycle submits it and a separate
+read-direction cycle fetches the result.
 
-Typical flow:
+| Command | Subsystem | Source | Purpose |
+|---|---|---|---|
+| `0x01` | Test harness | `subsys_testharness.c` | Echo test, used by `IFTEST` |
+| `0x02` | Raw SPI bridge | `subsys_spi.c` | Byte-level SPI, used by `SDTEST`'s original commands |
+| `0x03` | High-level SD | `subsys_sd.c` | `INIT`, `READ_SECTORS`, `WRITE_SECTORS`, `CHECK_MEDIA`. All SD command sequencing (CMD0/8/ACMD41/58/16/17/24/13) runs on the RP2040, so a whole multi-sector request is one round trip |
+| `0x04` | PCM5102 DAC | `subsys_dac.c`, `audio_i2s.pio` | PIO + DMA I2S, 16 KB ring buffer, internal-PLL or 256*Fs external clock, 8- and 16-bit PCM, built-in tone synthesis |
+| `0x05` | Sound Source configuration | `subsys_dss.c`, `dss_cmd.c` | FIFO depth and warm-up. See [../DSS.md](../DSS.md) |
 
-```bash
-./setup-firmware.sh
-./build-firmware.sh
-```
+**Sound Source mode.** Separate from the dispatcher: when the port's control
+lines show the Disney Sound Source signature (pins 14 and 16 both high),
+`main.c` runs `subsys_dss_run_session()` (`dss_capture.pio`, `dss_model.c`)
+instead of the dispatcher, feeding the same DAC ring. Details in
+[../DSS.md](../DSS.md).
 
-The normal output is a UF2 image under `firmware/build/` plus the host-side client binaries in `firmware/client`.
+**Reset.** GPIO13 (nAuto-LF) is a host-driven reset line with an interrupt.
+Asserting it aborts the in-flight handshake, parks the outputs at idle, waits
+for release and clears per-subsystem state. The wire layer's waits time out
+(`WIRE_TIMEOUT_US`, 250 ms) so an incomplete handshake cannot hang the Pico,
+except the top-level wait for a new command, which is unbounded by design.
 
----
+**SD notes.** Multi-block commands (`CMD18`/`CMD25`) are not implemented; the
+firmware loops single-block `CMD17`/`CMD24` internally. A write whose
+post-write busy-wait times out is reported as a failure, not a success.
 
----
+**Console.** USB CDC serial. ESC prints diagnostics, toggles verbose logging,
+resets all subsystems and plays a short beep (serviced between commands only).
+The on-board LED pulses on dispatch activity.
 
-### What is working:
-The reset path is confirmed working end-to-end, and the current firmware
-has moved the SD logic onto the Pico itself.
+## DOS tools (`client/`)
 
-- `src/wire.c`: GPIO13 (nAuto-LF) is a host-driven reset line with a GPIO
-  IRQ. Asserting it aborts the in-flight handshake, parks the Pico's
-  outputs at a known idle state, waits for the line release, then clears
-  per-subsystem state before the main loop resumes. This is the same
-  protocol reset pattern the host-side `host_reset()` in `client/*` uses.
-- `client/iftest.c` and `client/sdtest.c` both call `host_reset()` at
-  the start of a standalone run to ensure a known starting state.
-- The Pico firmware is now a real command dispatcher built around
-  `src/dispatch.c` / `src/dispatch.h`, with 4 subsystems: test harness,
-  raw SPI bridge, high-level SD subsystem, and I2S PCM5102 audio DAC.
-- `src/subsys_sd.c` / `src/subsys_sd.h` implement the high-level SD-over-
-  SPI protocol: `SD_OP_INIT`, `SD_OP_READ_SECTORS`, `SD_OP_WRITE_SECTORS`,
-  and `SD_OP_CHECK_MEDIA`.
-- `src/subsys_dac.c` / `src/subsys_dac.h` / `src/audio_i2s.pio` implement
-  the asynchronous I2S PCM5102 DAC audio engine with PIO + DMA ping-pong,
-  SCLK internal PLL / external PWM generation, built-in test tone synthesis,
-  and PCM streaming.
-- `client/dactest.c` (`DACTEST.EXE`) provides standalone bring-up tools
-  for testing audio beeps, custom tones, PCM file streaming, DAC status/underrun
-  monitoring, and the storage+audio multiplexed coexistence test jig (`dactest coex`).
-- The host-side `fast*` commands in `client/sdtest.c` (`fastinit`,
-  `fastcheck`, `fastread`, `fastwrite`, `fastbench`) exercise that
-  firmware path and are the current validation target for the SD
-  offload design.
+`iftest.c`, `sdtest.c`, `dactest.c`, `dsstest.c`, `dssstres.c`, `dsscfg.c`:
+plain real-mode `.EXE`s that drive the port directly, with no driver loaded.
+Usage for each is in its source header and in [../README.md](../README.md).
+`sdtest.c` also contains the `fast*` commands that exercise the firmware's SD
+offload, the standalone way to test the RP2040 side without `TRINKET.SYS`.
+File names are DOS 8.3-safe on purpose.
 
-This is the important distinction: the project is no longer a pure
-single-file echo test. The current design is “wire protocol + dispatch +
-subsystems,” and the SD subsystem is the first full firmware-side
-implementation of the original enhancement plan.
-
-The current firmware build is confirmed to compile cleanly with the real
-Pico SDK toolchain via the project build scripts. The remaining work is
-mostly validation against real media and cycle tuning, not a design gap in
-whether the subsystem model is correct.
-
----
-
-### Current status of the original enhancement plan:
-
-1. **High-level firmware offloading**: implemented in `src/subsys_sd.c` and
-   exercised by the `fast*` client commands.
-2. **Multi-block SD transfers (`CMD18`/`CMD25`)**: not implemented yet; the
-   firmware still loops per sector.
-3. **Media-check / VolID caching**: the firmware-side `SD_OP_CHECK_MEDIA`
-   prefilter exists; host-side media-change caching is still a separate
-   follow-up.
-4. **SPP handshake tuning**: present in C (`io_delay`, `host_reset`,
-   `raw_send_byte`, `raw_recv_byte`) in the host-side test harness; the
-   hand-written assembly unroll described in the enhancement document is
-   not present in this checkout.
-5. **Far-pointer normalization**: implemented in the legacy DOS-side path
-   in `src/TRINKET.C` via `advance_far_ptr()`, not in the firmware tree.
-
----
-
-### Next validation steps:
-
-1. **Regression check on the SD reset bug**: confirm `fastcheck` works
-   after a host reset without clearing the card's initialized state.
-2. **Firmware hardware verification**: run the `fast*` commands against a
-   real SD card and compare behavior to the older host-side `bench` path.
-3. **Measure/compare the optimized path**: verify the firmware-offloaded
-   `fastbench` is actually faster and consistent relative to the original
-   single-block read loop.
-4. **Extend to multi-block writes/reads**: when ready, move `CMD18` and
-   `CMD25` into the SD subsystem as the next performance step.
-
-This is the active branch of the project now: use the dispatch model,
-verify the SD subsystem against real hardware, and only then add the next
-performance layer.
-
----
-
-### Hardware Overview
+## Hardware overview
 
 | Ref | Part | Function | Direction |
 |---|---|---|---|
@@ -117,13 +75,13 @@ performance layer.
 | U4 | 74LVC245 | Data bus, LPT→Pico | 5V (LPT side) → 3.3V (Pico side), permanently direction-selected |
 
 **Headers:**
-- **H1** — I2C, 3.3V, 4.7K (NEW: Removed pull-ups for testing with PCM5102) (GPIO26/27)
+- **H1** — I2C-style header, 3.3V, GPIO26/27. Pull-ups removed on the prototype so the PCM5102 DAC connects directly (see the DAC wiring below)
 - **H2** — UART/I2C, 3.3V, no pull-ups on prototype (GPIO16/17)
 - **H3** — SPI, SD card interface (GPIO0–3)
 
 ---
 
-### GPIO Map
+## GPIO map
 
 | GPIO | Signal | LPT Pin (D-25) | Centronics Pin | Direction | Chip | Register / Bit |
 |---|---|---|---|---|---|---|
@@ -148,9 +106,9 @@ performance layer.
 
 **Note on "hw inverted":** this inversion happens inside the PC's parallel port ASIC, between the Control/Status register bit and the physical pin. It is entirely a host-driver concern. The trinket firmware only ever sees/drives the raw physical pin level and does **not** need to account for it.
 
-**pins 26 and 27** had pull-ups in previous versions of this document; they have been removed on the prototype to connect directly to the PCM5102 DAC module (see `SOUND.md`).
+**PCM5102 DAC wiring:** GPIO16 = BCK, GPIO17 = LRCK, GPIO27 = DIN, GPIO26 = SCLK (low selects the module's internal PLL, a PWM 256*Fs clock selects the external clock), plus 3.3 V and GND from the Pico. On the prototype GPIO26/27 have no pull-ups and the module's solder bridges are all left open.
 
-### Host-side register inversion table (for `.sys` driver reference)
+## Host-side register inversion table (for `.sys` driver reference)
 
 | Signal | Register bit | Bit=1 → physical pin | Bit=0 → physical pin |
 |---|---|---|---|

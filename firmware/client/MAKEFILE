@@ -1,5 +1,5 @@
 # Makefile for the DOS-side diagnostic clients (SDTEST.EXE, IFTEST.EXE,
-# DACTEST.EXE)
+# DACTEST.EXE, DSSTEST.EXE, DSSSTRES.EXE, DSSCFG.EXE)
 # -- built with Borland C++ 3.1, small model. Same toolchain/model as
 # src/MAKEFILE (TRINKET.SYS itself); see TOOLCHAIN.md for why this
 # project standardized on BC31 for everything DOS-side.
@@ -27,7 +27,7 @@
 
 CC=bcc -ms -I$(INCLUDE) -L$(LIB)
 
-all: sdtest.exe iftest.exe dactest.exe
+all: sdtest.exe iftest.exe dactest.exe dsstest.exe dssstres.exe dsscfg.exe
 
 sdtest.exe: sdtest.c
    $(CC) sdtest.c
@@ -38,8 +38,20 @@ iftest.exe: iftest.c
 dactest.exe: dactest.c
    $(CC) dactest.c
 
+dsstest.exe: dsstest.c
+   $(CC) dsstest.c
+
+dssstres.exe: dssstres.c
+   $(CC) dssstres.c
+
+dsscfg.exe: dsscfg.c
+   $(CC) dsscfg.c
+
 clean:
    del *.obj
    del sdtest.exe
    del iftest.exe
    del dactest.exe
+   del dsstest.exe
+   del dssstres.exe
+   del dsscfg.exe

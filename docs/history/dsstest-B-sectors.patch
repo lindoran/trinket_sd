@@ -1,0 +1,121 @@
+--- pristine/trinket_sd/firmware/client/dsstest.c	2026-11-01 09:17:30.000000000 +0000
++++ work/trinket_sd/firmware/client/dsstest.c	2026-11-07 23:48:14.427667620 +0000
+@@ -32,7 +32,7 @@
+  *     Status-paced sine wave at the DSS's 7000 Hz sample rate. A wrong
+  *     pitch means the drain rate is wrong. Defaults: 440 Hz, 3 s.
+  *
+- *   DSSTEST play <file.raw> [loops] [/B=<KB>]
++ *   DSSTEST play <file.raw> [loops] [/B=<sectors>]
+  *     Streams unsigned 8-bit mono raw audio (7000 Hz is what the
+  *     hardware plays at -- a 16-bit or 44.1 kHz file will sound like
+  *     noise) through the same paced loop.
+@@ -46,7 +46,8 @@
+  *     access mid-sound because its timer ISR keeps feeding the FIFO;
+  *     this tool is a foreground loop with no ISR.) A file bigger than
+  *     the free far heap is played in segments, and each segment load
+- *     is an audible gap. /B=<KB> caps the segment size.
++ *     is an audible gap. /B=<sectors> caps the segment size, in
++ *     512-byte sectors (so /B=1 is 512 bytes, /B=2 is 1 KB).
+  *
+  * Any key (or Ctrl-Break) stops a running stream cleanly. On exit the
+  * control register is put back to the trinket's idle value (02h) so the
+@@ -346,7 +347,7 @@
+     return 0;
+ }
+ 
+-static int cmd_play(const char *path, unsigned loops, unsigned long cap_kb) {
++static int cmd_play(const char *path, unsigned loops, unsigned long cap_sectors) {
+     FILE *f;
+     unsigned char huge *mem;
+     unsigned long filesize, avail, want, got, offset, sent = 0;
+@@ -371,7 +372,7 @@
+     avail = farcoreleft();
+     avail = (avail > FAR_RESERVE) ? (avail - FAR_RESERVE) : 0UL;
+     want = filesize;
+-    if (cap_kb != 0UL && want > cap_kb * 1024UL) want = cap_kb * 1024UL;
++    if (cap_sectors != 0UL && want > cap_sectors * 512UL) want = cap_sectors * 512UL;
+     if (want > avail) want = avail;
+     if (want == 0UL) {
+         fprintf(stderr, "dsstest: no free far memory to preload into\n");
+@@ -386,9 +387,14 @@
+     }
+     whole = (want >= filesize);
+ 
+-    printf("DSS play: %s (%lu KB) x%u on port %03Xh, preloading %s%lu KB (any key stops)\n",
+-           path, (filesize + 1023UL) / 1024UL, loops, base_port,
+-           whole ? "all " : "segments of ", (want + 1023UL) / 1024UL);
++    printf("DSS play: %s (%lu KB) x%u on port %03Xh, preloading ",
++           path, (filesize + 1023UL) / 1024UL, loops, base_port);
++    if (whole) {
++        printf("all %lu KB", (want + 1023UL) / 1024UL);
++    } else {
++        printf("segments of %lu sectors (%lu bytes)", (want + 511UL) / 512UL, want);
++    }
++    printf(" (any key stops)\n");
+ 
+     for (pass = 0; pass < loops && rc == 0; pass++) {
+         offset = 0UL;
+@@ -400,7 +406,11 @@
+                 fseek(f, (long)offset, SEEK_SET);
+                 printf("  loading %s%d ", whole ? "file" : "segment ", ++seg);
+                 got = load_segment(f, mem, want);
+-                printf(" %lu KB\n", (got + 1023UL) / 1024UL);
++                if (whole) {
++                    printf(" %lu KB\n", (got + 1023UL) / 1024UL);
++                } else {
++                    printf(" %lu sectors\n", (got + 511UL) / 512UL);
++                }
+                 if (got == 0UL) { rc = 3; break; }
+             } else {
+                 got = filesize;
+@@ -439,7 +449,7 @@
+     int nargs = 0;
+     int i;
+     int rc;
+-    unsigned long cap_kb = 0UL;
++    unsigned long cap_sectors = 0UL;
+ 
+     for (i = 1; i < argc; i++) {
+         if ((argv[i][0] == '/' || argv[i][0] == '-') &&
+@@ -447,7 +457,7 @@
+             base_port = (unsigned)parse_hex_ul(argv[i] + 3);
+         } else if ((argv[i][0] == '/' || argv[i][0] == '-') &&
+                    (argv[i][1] == 'B' || argv[i][1] == 'b') && argv[i][2] == '=') {
+-            cap_kb = (unsigned long)atol(argv[i] + 3);
++            cap_sectors = (unsigned long)atol(argv[i] + 3);
+         } else if (cmd == NULL) {
+             cmd = argv[i];
+         } else if (nargs < 3) {
+@@ -464,7 +474,7 @@
+             "  rate [seconds]          Measure the FIFO drain rate as the host sees it\n"
+             "  tone [freq] [seconds]   Status-paced sine at 7000 Hz (default 440 Hz, 3 s)\n"
+             "  play <file.raw> [loops] Preload, then stream unsigned 8-bit 7000 Hz mono raw\n"
+-            "                          (/B=<KB> caps the preload segment size)\n");
++            "                          (/B=<sectors> caps the preload segment, 512 bytes each)\n");
+         return 3;
+     }
+ 
+@@ -479,7 +489,7 @@
+         rc = cmd_tone((nargs >= 1) ? (unsigned)atoi(args[0]) : 440u,
+                       (nargs >= 2) ? (unsigned)atoi(args[1]) : 3u);
+     } else if (strcmp(cmd, "play") == 0 && nargs >= 1) {
+-        rc = cmd_play(args[0], (nargs >= 2) ? (unsigned)atoi(args[1]) : 1u, cap_kb);
++        rc = cmd_play(args[0], (nargs >= 2) ? (unsigned)atoi(args[1]) : 1u, cap_sectors);
+     } else {
+         fprintf(stderr, "dsstest: unknown command '%s'. Run without arguments for help.\n", cmd);
+         return 3;
+--- pristine/trinket_sd/DSS.md	2026-11-03 17:36:00.000000000 +0000
++++ work/trinket_sd/DSS.md	2026-11-07 23:48:19.239361533 +0000
+@@ -215,9 +215,9 @@
+    from the Sound Source while it runs. `DSSTEST play` therefore now
+    preloads the file into far memory before the first sample and never
+    touches the disk during playback (segmented, with an audible gap per
+-   segment, if the file exceeds free memory; `/B=<KB>` caps the segment
+-   size). A game gets away with disk access mid-sound because its timer
+-   ISR keeps feeding the FIFO -- which is the collision in item 1.
++   segment, if the file exceeds free memory; `/B=<sectors>` caps the
++   segment size in 512-byte sectors). A game gets away with disk access
++   mid-sound because its timer ISR keeps feeding the FIFO -- which is the collision in item 1.
+    With the interrupt lock in place the game's ISR is held off while the
+    driver owns the wire, so a game reading from the SD card mid-sound
+    will gap for the length of each chunk, exactly as a real DSS would

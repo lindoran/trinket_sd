@@ -1,258 +1,349 @@
-# TRINKET SD (what is it?)
-This is a one stop shop SPP based sound and storage option for dos era
-gear that could benifit from it existing.   This will let you bring up 
-a mass storage device, play sounds and maybe more.. all from a standard
-lpt port.
+# Trinket SD
 
-Why? specifically there's a need because projects like the much simpler
-sdpp project exist but are flawed.  Having a very standard way to 
-connect a modern serial device to a paralell port without having to 
-worry if the card is going to be compatible, or if the port wiring is 
-supported by the tranciever on the sd card module.   And while this 
-isn't fast -- its a fair bit faster for bakcking up data to a card, 
-as the computer no longer has to worry about i2c timing, it just sends 
-bytes down the wire.
+SD-card storage and sound for DOS-era PCs, through an ordinary parallel port.
 
-# TRINKET.SYS
+The trinket is a small board built around a Raspberry Pi Pico (RP2040). It
+plugs into a PC's printer port (SPP mode, no ECP/EPP needed) and gives a DOS
+machine two things at once:
 
-One concrete `CONFIG.SYS DEVICE=` block-device driver for a DOS-era SD
-card reader built on the trinket parallel-port bridge. No TSR, no INT
-2Fh redirector, no separate hardware-layer driver + MSCDEX-analog pair
--- DOS sees a normal block device with a BPB, the same way it sees a
-floppy or hard disk, and every FAT16 filesystem operation (dir, copy,
-etc.) is handled by DOS itself against that BPB.
+- **An SD card as a normal DOS drive.** `TRINKET.SYS` is a `CONFIG.SYS`
+  block-device driver. DOS sees a drive with a BPB, like a floppy or a hard
+  disk, and handles `DIR`, `COPY`, running programs, and so on by itself.
+  No TSR, no redirector.
+- **Sound.** The trinket plays **Disney Sound Source** audio for games that
+  already know how to drive one (the game writes the printer port directly,
+  nothing is installed on the PC for this), and it has a **PCM5102 I2S DAC**
+  path for raw PCM playback.
 
-**Status**: working end to end on real hardware -- `TRINKET.SYS` boots
-DOS from an SD card and has run Wolfenstein 3D from it, reported by feel
-as no slower than a parallel-port Zip drive. See "Where things stand"
-below for what that does and doesn't cover, and "Where this is headed"
-for what's next -- notably, further storage-side optimization is
-intentionally paused (see that section).
+Why bother: projects like `sdpp` bit-bang an SD card straight off the
+parallel-port pins, which depends on the card, the module's level shifter and
+the port's wiring all being cooperative. Here the port only ever talks to a
+fixed, level-shifted interface and the RP2040 does the SD work. It is not
+fast (see [Performance](#performance)), but it is predictable.
 
-## Repo layout
+## Read this first
 
-Two separate toolchains and code paths live here, sharing wire
-protocols but never built together:
+> **The SD card is fixed media. Never insert, remove or swap the card while
+> the trinket is powered.**
+> The SD socket is wired straight to an always-on 3.3 V rail, there is no
+> card-detect wiring, and the firmware has no graceful-unmount path. A card
+> pulled out (or pushed in) mid-operation can be corrupted, most likely by
+> interrupting a write at the card's most vulnerable moment. Power down,
+> change the card, power up.
 
-- **`src/`** -- the real-mode Borland C++ 3.1/Turbo Assembler driver
-  that produces `TRINKET.SYS` for a DOS-era machine.
-- **`firmware/`** -- the RP2040 side: a CMake/Pico-SDK project
-  (`firmware/src/`) plus DOS-side diagnostic client tools
-  (`firmware/client/`, e.g. `sdtest.c`'s `fastinit`/`fastread`/
-  `fastbench`/`fastcheck` commands -- the standalone way to exercise the
-  RP2040 side without the driver in the loop at all). The client tools
-  build with the same Borland C++ 3.1 toolchain as `src/` (as of
-  2026-09-08 -- they used to be a third, ia16-elf-gcc toolchain; see
-  TOOLCHAIN.md for why that changed), so this project has two toolchains
-  total, not three: arm-none-eabi-gcc for `firmware/src/`, Borland C++
-  3.1 for everything DOS-side (`src/` and `firmware/client/` alike).
+## Status
 
-See [firmware/README.md](./firmware/README.md) for the firmware side in
-its own detail, and **[TOOLCHAIN.md](./TOOLCHAIN.md) for the full,
-current build-environment story** -- what each toolchain actually needs,
-what reproduces in a fresh sandbox and what doesn't, and the real
-hazards and build-system gotchas a clean build alone won't catch. Both
-are referenced throughout this file rather than duplicated.
+Everything below was tested on one bench rig: a VIA Eden thin client with a
+real parallel port, running FreeDOS. Nothing has been run on a real 8088/XT
+class machine yet.
 
-## Building
+| Area | State |
+|---|---|
+| SD init, sector read/write, media check | Confirmed on hardware |
+| DOS running software from the card (Wolfenstein 3D) | Confirmed on hardware |
+| Disney Sound Source emulation (`DSSTEST`, Wolf3D digitized sound) | Confirmed on hardware; mild dropouts during disk loads (see [Known limitations](#known-limitations)) |
+| Interrupt guard, `/l=` (`DSSSTRES` clean with the guard on, fails with `/l=0` as designed) | Confirmed on hardware |
+| PCM playback through the DAC (`DACTEST play`) | Confirmed at 8 kHz mono 8-bit. 44.1 kHz 16-bit stereo underruns (too much data for the port) |
+| Deeper Sound Source FIFO (`/f=`, `/w=`, `DSSCFG`) | Implemented and unit-tested on a host. **Not yet confirmed on hardware** |
+| Real 4.77 MHz XT-class machine | **Not tested** |
+| Tandy-style Sound Source (strobe value `0Eh`) | Not supported |
+| FAT32 cards | Not supported. Use FAT16 |
+
+## What you need
+
+- **A trinket board** with firmware flashed (step 2 below), a DB-25 parallel
+  cable to the PC, and a way to power the Pico.
+  > **TODO (maintainer):** state how the production board is powered (USB on
+  > the Pico?) and which cable it expects, before release.
+- **A microSD/SD card, 2 GB or smaller recommended, formatted FAT16** with
+  512-byte sectors and an MBR partition table. The driver handles SDv1/MMC
+  and SDv2/SDHC cards; testing was done with a 2 GB FAT16 card.
+- **A DOS PC with a standard (SPP) parallel port** at a known address. LPT1
+  at 378h is the default. The bench rig used FreeDOS. The driver and tools
+  are compiled for the plain 8086 (no 186/286 compiler switches).
+- **To build from source instead of using the prebuilt files:** see
+  [Building from source](#building-from-source).
+
+## Quick start
+
+1. **Get the files.** Either take a release, or build (`./build.sh`) and use
+   what lands in `dist/`:
+
+   | File | Goes to |
+   |---|---|
+   | `trinket_sd.uf2` | The trinket (firmware) |
+   | `TRINKET.SYS` | The DOS machine, loaded from `CONFIG.SYS` |
+   | `SDTEST.EXE`, `IFTEST.EXE`, `DACTEST.EXE`, `DSSTEST.EXE`, `DSSSTRES.EXE`, `DSSCFG.EXE` | The DOS machine, optional tools (see [Tools](#tools)) |
+
+2. **Flash the firmware.** Hold the Pico's BOOTSEL button while connecting its
+   USB port to a modern computer. It shows up as a drive named `RPI-RP2`.
+   Copy `trinket_sd.uf2` onto it. The Pico reboots by itself.
+
+3. **Prepare the card.** On a modern machine, format it FAT16 with an MBR
+   (a single primary partition is the simple case). Copy over whatever you
+   want on it. Safely eject, then insert the card into the trinket **while
+   the trinket is unpowered**.
+
+4. **Cable it up.** Connect the trinket to the parallel port with the PC
+   powered down, then power the trinket.
+
+5. **Install the driver.** Copy `TRINKET.SYS` to the DOS machine and add to
+   `CONFIG.SYS`:
+
+   ```
+   DEVICE=C:\TRINKET\TRINKET.SYS
+   ```
+
+   For a port other than LPT1 at 378h, or other options, see
+   [CONFIG.SYS options](#configsys-options).
+
+6. **Reboot and check the boot messages.** A good start looks like:
+
+   ```
+   TRINKET.SYS - SD card via trinket parallel port bridge
+   TRINKET: card ready (SDv2, block-addressed)
+   SD initialized on DOS drive D
+   ```
+
+   The drive letter is whatever DOS assigns next. `DIR D:` should list your
+   card. If you instead see `SD: adapter or card not found`, go to
+   [Troubleshooting](#troubleshooting).
+
+## Using it
+
+### Storage
+
+The card is a normal DOS drive. Anything DOS can do to a FAT16 volume works:
+`DIR`, `COPY`, `DEL`, running programs, and so on. A few practical notes:
+
+- Keep the card fixed (see [Read this first](#read-this-first)).
+- The driver checks the volume ID of the card on media-change queries and
+  caches the answer for about two seconds, so a swap would be caught if it
+  happened, but do not rely on that. Swapping is unsupported.
+- Large requests are split into chunks (`/l=`, default one sector) so that
+  other programs' interrupt handlers get a turn. See below.
+
+#### Performance
+
+On the bench rig a 512-byte sector takes about 17 ms over the port, so
+roughly 30 KB/s sustained. A slower PC will be slower. Reported by feel,
+Wolfenstein 3D from the card ran no slower than from a parallel-port Zip
+drive. The limit is the port's byte-at-a-time handshake, not the SD card.
+Reading a byte takes about twice the handshakes of writing one.
+
+### Sound: Disney Sound Source
+
+For any program that supports the Disney Sound Source:
+
+1. Install the driver as above (the sound side does not need it, but it keeps
+   disk and sound from stepping on each other, see below).
+2. In the program's sound setup, choose **Disney Sound Source** on the
+   printer port the trinket is plugged into (LPT1 / 378h for most setups).
+3. Play.
+
+The trinket recognises a game driving a Sound Source by its control-register
+writes (`04h` / `0Ch`), emulates the unit's 16-byte FIFO and its fixed 7 kHz
+drain rate, answers the game's "FIFO full" poll, and plays the samples
+through the DAC. Nothing resident is needed on the PC for this.
+
+Confirmed with stock Wolfenstein 3D. Known quirks:
+
+- A game that detects the unit by writing more than 16 bytes expects the
+  "full" flag. The trinket raises it at 15 bytes on purpose (one byte early,
+  so a late-polling game cannot overrun the FIFO).
+- Sound Source audio is fixed at 7 kHz, 8-bit unsigned mono. Files for
+  `DSSTEST play` must match that or they play as noise.
+
+### Sound: PCM through the DAC
+
+`DACTEST` streams raw PCM to the DAC directly. It is a diagnostic and
+bring-up tool, not a player for general use.
 
 ```
-./build.sh            # builds firmware + DOS driver + DOS client tools, -> dist/
-./clean-all.sh
-./check-toolchain.sh  # check to see if the build depends exist.
-
+DACTEST beep                    1 kHz test tone, internal DAC clock
+DACTEST beep_ext                1 kHz test tone, external clock on GPIO26
+DACTEST tone 440 2000           440 Hz for 2000 ms
+DACTEST play SOUND.PCM 8000 1 int 8      file, rate, channels, clock, bits
+DACTEST status                  DAC state, queue, underruns
+DACTEST stop
 ```
 
-The same build chain is available through the top-level `Makefile`:
+`play` does **no resampling**. If the file is not really encoded the way you
+tell it, it plays at the wrong speed and pitch. Make files to match, for
+example with SoX:
 
 ```
-make                  # build firmware, DOS driver, and DOS client tools
-make package          # build everything and create .tar.gz, .7z, and .zip archives
-make toolchain        # check all build/package dependencies
-make firmware         # build RP2040 firmware only
-make client           # build only the DOS client tools (Borland C++ 3.1 + dosbox)
-make driver           # build only the DOS driver (Borland C++ 3.1 + dosbox)
-make setup            # install or link firmware build dependencies
-make clean            # remove all generated artifacts
-make help             # list all targets
+sox in.wav -r 8000 -c 1 -b 8 -e unsigned-integer SOUND.PCM
 ```
 
-Or individually: `build-firmware.sh`/`clean-firmware.sh` (RP2040 only),
-`build-driver.sh`/`clean-driver.sh` (the DOS driver), and
-`build-client.sh`/`clean-client.sh` (the DOS client tools) -- the latter
-two both via dosbox + the vendored Borland toolchain, no dosemu2 needed.
-All six leave their output in `dist/`.
+How much audio fits: the port moves roughly 137 KB/s when reading from the
+SD card and writing to the DAC at once (derived from observed underruns).
+8 kHz mono 8-bit (8 KB/s) played 80 seconds cleanly on hardware. 44.1 kHz
+16-bit stereo (176 KB/s) is beyond what the port can carry and underruns
+badly. Rates in between are untested, though 22.05 kHz 16-bit stereo
+(88 KB/s) has about 36 % headroom on paper.
 
-**One thing you must supply yourself**: `legacy/bc31/` (Borland C++
-3.1) is gitignored on purpose -- it's proprietary software this repo
-has no right to redistribute, so a plain clone/zip export will never
-include it. `build-driver.sh` and `build-client.sh` both fail with a
-clear message explaining this if it's missing; see TOOLCHAIN.md for
-exactly what needs to be there.
+### Sound and storage together
 
-## Where each piece came from
+Both share one parallel port. A game's sound feeder (a timer interrupt)
+and a disk transaction can collide, so `TRINKET.SYS` runs every sector
+transfer with interrupts off, in windows of `/l=` sectors. With the default
+`/l=1` a game gets a turn between every sector. In practice sound plays
+through disk access with at most a brief dropout, for example in Wolfenstein
+3D's demo, which loads data while playing samples. During sustained disk
+reads most of a game's timer interrupts are held off while the driver owns
+the port, which can slow a game's own clock.
 
-The original Borland C++ repo for PPSD:
-https://github.com/nilseuropa/sdpp. This project kept its functional
-workflow (DOS-side FAT16/BPB/MBR logic, `diskio.h` contract) and
-replaced the storage backend to talk to the trinket link instead of
-bit-banging SPI directly on parallel-port data lines.
+## CONFIG.SYS options
 
-| File | Origin | Changed? |
+```
+DEVICE=TRINKET.SYS [/d] [/p=n] [/b=n] [/l=n] [/f=n] [/w=ms] [/k]
+```
+
+| Option | Meaning | Default |
 |---|---|---|
-| `HEADER.ASM` | `sdpp-main` (R. Armstrong, 1994) | No -- device header/STRATEGY/INTERRUPT glue, no SD-specific code |
-| `DRIVER.C` | `sdpp-main` | Banner text; added `bios_ticks()` and its own `advance_far_ptr()` for Debug-mode timing and far-pointer safety in `ReadBlock()`/`WriteBlock()`; INIT/READ/WRITE/IOCTL/BPB dispatch shape otherwise untouched |
-| `SD.C` | `sdpp-main` | `SDMediaCheck()` now does a real VolID comparison, a firmware-side `CHECK_MEDIA` pre-filter, and a short time-based debounce (see below); FAT16 BPB/MBR partition discovery itself is unchanged |
-| `CPRINT.C/H`, `STANDARD.H`, `INTEGER.H` | `sdpp-main` | No |
-| `DRIVER.H`, `DISKIO.H` | `sdpp-main` | One new prototype each (`bios_ticks()`, `disk_check_media()`) |
-| `TRINKET.C` | **new** | Replaces `sdpp-main`'s `SDMM.C` (bit-banged SPI). Speaks the trinket's high-level `DISPATCH_CMD_SD` protocol -- sends a sector number and a count, gets sector data back. Doesn't itself know about CMD17/CMD24/R1/data-tokens/byte-vs-block-addressing any more; that all runs on the RP2040 now (`firmware/src/subsys_sd.c`) |
+| `/p=n` | Partition number (1-4) in the MBR to use | First available |
+| `/b=n` | Port base: 1 = 3BCh, 2 = 378h, 3 = 278h, 4 = 3E8h, 5 = 2E8h | 2 (378h) |
+| `/l=n` | Sectors per interrupts-off window, 0-64. Smaller = shorter sound gaps; `0` = never disable interrupts, use full 64-sector transfers (only safe if nothing else ever writes the port, i.e. no Sound Source software) | 1 |
+| `/f=n` | Sound Source FIFO depth to present, 16-512 bytes. 0 or omitted = leave the trinket at the real unit's 16. **Experimental, unconfirmed on hardware** | off |
+| `/w=ms` | Warm-up (0-2000 ms) during which a freshly powered-up program sees the real 16-byte FIFO so its detection test passes. Only used with `/f` | 250 |
+| `/d` | Verbose driver messages | off |
+| `/k` | Accepted and ignored (card detect is not wired) | |
 
-`SD.C` calling `disk_read()`/`disk_write()`/`disk_initialize()`/
-`disk_status()`/`disk_check_media()` is the seam that made this
-possible without touching DOS-facing code: everything above that line
-(BPB math, MBR partition scan, DOS request-header dispatch) doesn't
-know or care how a sector actually gets fetched.
+Bad options print `SD: bad options in CONFIG.SYS` or a specific
+`SD: Invalid ...` message. `DSSCFG.EXE` can show or change the FIFO depth at
+run time (`DSSCFG`, `DSSCFG 256`, `DSSCFG default`). The setting lives in the
+trinket's RAM and does not survive a trinket power cycle. `/f` and `/w` are
+what make it permanent, since the driver re-sends them every time it
+initialises the card. Details in [DSS.md](./DSS.md).
 
-`TRINKET.C` itself was ported, not reinvented, in two pieces:
+## Tools
 
-- **Wire-level handshake** (`ctrl_out`/`io_delay`/`wait_error_high`/
-  `wait_error_low`/`raw_send_byte`/`raw_recv_byte`/`host_reset`, plus
-  `raw_recv_bulk_far`/`raw_send_bulk_far` for far-pointer-safe
-  multi-byte transfers) -- confirmed on real hardware; uses Borland/
-  Turbo C's `outp()`/`inp()` (`<conio.h>`) rather than inline asm, the
-  same convention `sdpp-main`'s own `SDMM.C` already used.
-- **`DISPATCH_CMD_SD` client layer** (`sd_op_init`/`sd_op_read_sectors`/
-  `sd_op_write_sectors`/`sd_op_check_media`) -- ported from
-  `firmware/client/sdtest.c`'s own `sd2_*` client, itself confirmed via
-  the standalone `fastinit`/`fastread`/`fastwrite`/`fastbench`/
-  `fastcheck` diagnostic commands before this driver ever used it.
+All are plain DOS `.EXE` programs. They talk to the port directly, so run
+them from the DOS prompt, not while a game is using the sound path. Each
+takes `/P=378` to pick a different port.
 
-## Where things stand
+| Tool | What it is for |
+|---|---|
+| `IFTEST` | Lowest-level wire check: resets the trinket, sends a byte, reads it back. Run this first if nothing works. `IFTEST [byte_hex] [port_hex]` |
+| `SDTEST` | SD and FAT16 diagnostics that bypass `TRINKET.SYS`: `init`, `dir`, `cat NAME`, `readsector LBA`, `writesector LBA -y`, `bench`, plus the `fast*` commands that use the firmware's SD offload (`fastinit`, `fastcheck`, `fastread`, `fastwrite`, `fastbench`) |
+| `DACTEST` | DAC beeps, tones, PCM streaming, status/underruns, and a storage+audio coexistence test (`coex`) |
+| `DSSTEST` | Behaves like a game driving a Sound Source: `detect`, `rate`, `tone`, `play` |
+| `DSSSTRES` | Stress test for interrupt collisions between a game-style sound feeder and disk I/O. `read` is safe, `write` creates and deletes a scratch file on the card |
+| `DSSCFG` | Show or change the Sound Source FIFO depth |
 
-**Confirmed on real hardware, end to end**: card init, sector read/write,
-media check, and DOS booting + running software (Wolf3D) from the card
-through this exact driver -- not just isolated benchmarks.
+## Checking an installation
 
-**Deliberately not implemented**:
-- **Card-detect** (`/k`). The trinket's GPIO map has no card-detect
-  line -- `sdpp-main`'s CD-on-BUSY wiring doesn't apply here. `/k` is
-  accepted on the `CONFIG.SYS` line and silently ignored.
-- **Multi-block SD commands** (`CMD18`/`CMD25`). `disk_read()`/
-  `disk_write()` already batch a whole multi-sector request into one
-  `DISPATCH_CMD_SD` round trip, but the RP2040 firmware still loops
-  single-block `CMD17`/`CMD24` internally rather than issuing a real
-  multi-block command. On hold -- see "Where this is headed" below.
+Work up from the bottom. Stop at the first step that fails.
 
-**Worth knowing about, not bugs**:
-- `SDMediaCheck()`'s time-based debounce skips even the cheap
-  `CHECK_MEDIA` probe if checked within the last ~2 seconds -- a real,
-  if narrow, window where a physical card swap wouldn't be detected.
-  Probably fine given a swap takes a human several seconds minimum, but
-  it's a deliberate trade against the driver's original always-verify
-  guarantee, not a free win.
-- The wire protocol's own per-byte handshake, not SD-command overhead,
-  dominates the remaining per-block time: moving SD command sequencing
-  onto the RP2040 (this section's whole `DISPATCH_CMD_SD` migration)
-  measured as a real but modest ~26% faster than the old per-sector
-  path, not the dramatic win a naive read of the numbers might suggest.
-  The lever that would actually move that floor is a wire-protocol-level
-  redesign (batch the acknowledgment every N bytes instead of every
-  byte) -- see below for why that's paused too.
+1. `IFTEST` reports `MATCH`. The wire, the cable and the firmware are alive.
+2. `SDTEST init` finds and parses the card's FAT16 volume. The SD side works
+   without the driver.
+3. The boot messages show `card ready` and `SD initialized on DOS drive X`,
+   and `DIR` on that drive works.
+4. `DACTEST beep` makes a tone. The DAC works.
+5. `DSSTEST detect` exits with code 0. The Sound Source emulation works.
+   `DSSTEST tone 440 3` should play a steady 440 Hz.
 
-## Where this is headed
+## Troubleshooting
 
-The next planned addition is **audio** -- likely starting with something
-Disney-Sound-Source-shaped (a raw PCM stream, no synthesis) through a
-PCM5102 I2S DAC on the RP2040's spare GPIOs, with the RP2040's PIO+DMA
-generating the I2S bitstream. Whether that becomes transparently
-compatible with existing DOS games' native Adlib/Disney-Sound-Source
-port I/O, or needs its own explicit client software, is still an open
-design question -- the parallel port here is already fully committed to
-`DISPATCH_CMD_SD`'s framing, so a second device sharing that same wire
-needs either a second physical LPT port, a V86 port-trapping TSR, or a
-firmware-side hardware snoop on a second port's electrical lines. The
-audio pipeline itself (PCM5102 wiring, PIO/DMA streaming, a bespoke
-`DISPATCH_CMD_SOUND` test command in the sdtest.c style) is the planned
-first concrete step, independent of that question.
+| Symptom | Likely cause |
+|---|---|
+| `SD: adapter or card not found` / `try another port` | Wrong port (`/b=`), cable not connected, firmware not flashed, or no card. Run `IFTEST` to separate "wire dead" from "card problem" |
+| `TRINKET: SD_OP_INIT failed` | The trinket answered but the card did not initialise. Power down, reseat the card, try another card, run `SDTEST init` |
+| Drive appears but `DIR` errors | Card is not FAT16 with 512-byte sectors, or `/p=` names the wrong partition |
+| Abort/Retry/Ignore errors during sound | A sound feeder collided with a disk transfer. Make sure `/l=` is not `0` |
+| Sound plays at the wrong pitch | The file's real rate is not what it was declared as (DACTEST), or it is not 7 kHz unsigned 8-bit mono (DSSTEST) |
+| Pops or underruns in `DACTEST status` | The data rate is higher than the port carries. Lower the rate or bit depth |
+| A game's clock runs slow during long disk reads | Timer interrupts are held off while the driver owns the port. This is expected. `DSSSTRES` shows how many ticks are lost and resyncs the DOS clock from the RTC |
 
-**Storage-side optimization is intentionally on hold until the sound
-work is solid.** Specifically: multi-block SD commands (`CMD18`/`CMD25`)
-and any wire-protocol-level burst-transfer redesign are paused, not
-abandoned. Both would touch the same dispatch/wire-protocol layer a
-second, sound-capable device will also need to share -- doing that
-redesign once, informed by both storage's and sound's actual
-requirements, is the goal; doing it now for storage alone would risk
-having to revisit or partially undo it once sound's requirements are
-known. `DISPATCH_CMD_SD` in its current form is considered a stable
-foundation to build the sound work on top of, not a placeholder that's
-about to change shape.
+Firmware diagnostics: the Pico exposes a USB serial console. Open it in any
+terminal program. Pressing **ESC** prints a hardware, SD, DAC and Sound
+Source diagnostics report, toggles verbose logging on or off, resets every
+subsystem to idle and plays a short test beep, so do not press it during a
+test run. The console is only serviced between commands: after a game's
+Sound Source session, it answers once the next access to the card happens.
+The Pico's on-board LED shows dispatch activity.
 
-## CONFIG.SYS usage
+## Known limitations
 
-```
-DEVICE=TRINKET.SYS /p=<partition #> /b=<port base index>
-```
+- **FAT16 only**, 512-byte sectors, one drive.
+- **SD card is fixed media** (see the warning at the top).
+- **Speed is bounded by the port.** Multi-block SD commands (`CMD18`/`CMD25`)
+  and a burst-transfer redesign of the wire protocol are not implemented.
+  Either is the only thing that would move that ceiling further. Neither has
+  been started.
+- **Brief dropouts** can happen in a Sound Source game while it loads from
+  the card. Heard on hardware in Wolfenstein 3D's demo, mild. The deeper
+  FIFO (`/f=`) is aimed at this but is unconfirmed.
+- **Sound Source detection** by games that probe at an arbitrary moment (not
+  at power-up) may fail at a deep FIFO depth. Set `DSSCFG default` if so.
+- **Not tested on a real XT.** The Sound Source path is designed to work on
+  an 8088 (no port trapping), but timing there is unmeasured.
 
-Same option letters as `sdpp-main`, `/k` accepted but inert (see above):
+## Hardware
 
-```
-/d = debugging mode -- DRIVER.C's own verbose cdprintf messages (media
-     check calls, init/read/write status, Debug-mode timing breakdown).
-     TRINKET.C itself always prints one unconditional line on a
-     successful init ("card ready (...)"); the detailed CMD0/CMD8/
-     ACMD41/CMD17/CMD24-level diagnostics that used to live here now run
-     on the trinket's own RP2040 firmware (its own USB-CDC debug log,
-     toggled independently -- see firmware/README.md), not gated by
-     this flag at all.
-/p = partition number (1-4) in the MBR to use. Default: first available.
-/b = port base index: 1=0x3BC, 2=0x378, 3=0x278, 4=0x3E8, 5=0x2E8
-     Default: 0x378
-```
+The prototype is a Raspberry Pi Pico plus three level-translation parts and
+an SD socket module:
 
-## Real-mode hazards this driver had to work around
+| Part | Role |
+|---|---|
+| Pico (RP2040) | Everything: wire protocol, SD driving, audio |
+| 4-channel bidirectional MOSFET level shifter | Control lines LPT pins 1, 14, 16, 17 (5 V PC side to 3.3 V) |
+| 74LVC245 | Data lines D0-D7, LPT pins 2-9, PC to Pico |
+| 74AHCT245 | Status lines LPT pins 10, 11, 12, 13, 15, Pico to PC |
+| SD module (3.3 V regulator + 74LVC125 level shifter) | SPI-mode card socket |
+| PCM5102 I2S DAC | Audio |
 
-Two hard real-mode issues had to be solved before this could boot
-cleanly, and both recur any time new arithmetic touches this driver's
-`STRATEGY`/`INTERRUPT` call path. **See
-[TOOLCHAIN.md](./TOOLCHAIN.md#known-driver-specific-hazards) for the
-canonical writeup** (including a variant of the second one -- far
-pointer *array indexing*, not just `+=`/`++` -- found later during the
-`DISPATCH_CMD_SD` migration). Short version:
+The complete GPIO map, header assignments and the register-inversion table
+are in [firmware/README.md](./firmware/README.md). The PCM5102 connects as
+GPIO16 = BCK, GPIO17 = LRCK, GPIO27 = DIN, GPIO26 = SCLK (the module's solder
+bridges all left open on the prototype), 3.3 V and GND.
 
-1. **32-bit shift/multiply pulls in `cs.lib` helpers**
-   (`arg >> 24`, `lba * 512ul`-style `DWORD` operations compile to calls
-   into `N_LXLSH@`/`N_LXURSH@`), which crash with exception 06 from this
-   driver's private stack. Fixed by keeping this arithmetic in 16-bit
-   (`WORD`) pieces -- byte-reinterpretation for command arguments,
-   direct-memory-write construction for `bios_ticks()`.
-2. **Far pointer arithmetic only touches the 16-bit offset** (`p += N`,
-   `p++`, and array indexing `p[i]` all have this problem identically) --
-   it doesn't carry into the segment, so a buffer positioned near a 64K
-   boundary silently corrupts. Fixed by walking a local far pointer via
-   `advance_far_ptr()` instead. `TRINKET.C` and `DRIVER.C` each carry
-   their own independently-written (both verified correct) version of
-   this helper -- a carry-on-wraparound approach in `TRINKET.C`, a
-   two-pass minimal-offset normalization in `DRIVER.C`.
+## Building from source
 
-**Verification, checked directly rather than assumed**: `H_LURSH`/
-`H_LLSH`/`N_LX*` are absent from both the link map and `bcc -S` output
-(re-checked after the `DISPATCH_CMD_SD` migration and the media-check
-rewrite); the DOS build compiles and links cleanly via `build-driver.sh`;
-the driver boots, maps to a drive letter, and has run DOS software from
-the card end to end.
-
-## Building on real DOS hardware
-
-If you're building directly on a period DOS machine rather than
-cross-building via `build-driver.sh`, set up Borland C++ 3.1 the
-standard way in `autoexec.bat`:
+Three build targets, from three scripts (or `make`, which wraps them):
 
 ```
-SET INCLUDE=C:\BC31\INCLUDE\
-SET LIB=C:\BC31\LIB
-SET TEMP=C:\TEMP
-PATH C:\;C:\BC31\BIN;%PATH%
+./check-toolchain.sh   # what is installed and what is missing
+./build.sh             # firmware + DOS driver + DOS tools -> dist/
+./clean-all.sh
 ```
 
-Then `cd src` and run the vendored `MAKEFILE` (`make -f MAKEFILE`)
-directly.
+| Target | Script | Needs |
+|---|---|---|
+| RP2040 firmware (`trinket_sd.uf2`) | `build-firmware.sh` | `arm-none-eabi-gcc`, `cmake`, `git`. The Pico SDK 2.3.0 is cloned on first run |
+| DOS driver (`TRINKET.SYS`) | `build-driver.sh` | `dosbox` + **Borland C++ 3.1** in `legacy/bc31/` |
+| DOS tools (`*.EXE`) | `build-client.sh` | same as the driver |
+
+**You must supply Borland C++ 3.1 yourself.** It is proprietary, so
+`legacy/bc31/` is gitignored and a clone will not contain it. The DOS build
+scripts stop with a message saying so if it is missing. Full details,
+including the compiler pitfalls that matter when changing the driver, are in
+[TOOLCHAIN.md](./TOOLCHAIN.md).
+
+`make package` builds release archives (`.tar.gz`, `.7z`, `.zip`) from
+everything in `dist/` and a source archive (`trinket_sd-source.tar.gz`).
+All archives are placed in `packages/`, which is separate from build output
+and is preserved by `make clean`. Packaging needs `7z` and `zip`.
+
+## Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/` | `TRINKET.SYS` driver (Borland C++ 3.1 / TASM) |
+| `firmware/src/` | RP2040 firmware (C, Pico SDK) |
+| `firmware/client/` | DOS test and configuration tools |
+| `firmware/tests/` | Host-side unit tests for the Sound Source model (`run_tests.sh`) |
+| `DSS.md` | Disney Sound Source emulation reference |
+| `TOOLCHAIN.md` | Build environment reference and compiler hazards |
+| `docs/history/` | Development notes, superseded plans and test logs. Kept for the record, **not** a current reference. Start with its README |
+
+## Credits and license
+
+The driver core derives from [sdpp](https://github.com/nilseuropa/sdpp)
+(R. Armstrong, D. Marks, ChaN, nilseuropa). `src/HEADER.ASM`, `CPRINT.*`,
+`STANDARD.H` and `INTEGER.H` are unchanged from it, `DRIVER.C` and `SD.C`
+are modified, and `TRINKET.C` replaces its bit-banged SPI layer with
+this project's wire protocol. Licensed under the GNU GPL v2, see
+[LICENSE](./LICENSE).

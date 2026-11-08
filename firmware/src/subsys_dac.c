@@ -14,6 +14,7 @@
 #include "hardware/pwm.h"
 #include "hardware/clocks.h"
 #include "hardware/irq.h"
+#include "hardware/structs/nvic.h"
 
 #include "debug.h"
 #include "wire.h"
@@ -427,8 +428,116 @@ static bool push_stereo_frame16(int16_t left, int16_t right) {
 // or dithered -- just enough to make an 8-bit source audible through
 // the existing 16-bit ring/DMA/PIO path without a second, parallel
 // DAC code path for a different sample width.
-static int16_t upsample_8_to_16(uint8_t raw) {
+static inline __attribute__((always_inline)) int16_t upsample_8_to_16(uint8_t raw) {
     return (int16_t)(((int)raw - 128) << 8);
+}
+
+// ---------------------------------------------------------------------
+// Disney Sound Source sink (firmware-internal, see subsys_dac.h)
+// ---------------------------------------------------------------------
+static volatile uint32_t dss_ring_drops = 0;
+
+// A DSS session counts as "playing" for underrun purposes only once the
+// ring has held one full DMA chunk. Until then the DMA IRQ is going to find
+// the ring short at least once simply because the audio hasn't had time to
+// arrive (a chunk is 36.6 ms of audio at 7 kHz), and counting that would
+// bury real mid-stream starvation under one false underrun per session.
+static volatile bool dss_primed = false;
+
+void subsys_dac_dss_begin(uint32_t rate_hz) {
+    if (rate_hz < 4000u || rate_hz > 192000u) {
+        rate_hz = current_sample_rate;
+    }
+    // Same configuration the Wolf3D client sets through DAC_OP_CONFIG:
+    // internal-PLL SCLK (GPIO26 low), rate as given. Channels/bits only
+    // describe how a wire client's DAC_OP_WRITE payload is parsed, which
+    // this path bypasses, so they are left alone.
+    //
+    // A DSS session can start and stop many times in one game (every time
+    // the dispatcher takes the port for a disk read, then the game writes
+    // the control port again), so only touch the I2S clock and the SCLK pin
+    // when something actually differs. Re-running gpio_init() on SCLK and
+    // rewriting the PIO divider for no reason is exactly the kind of thing
+    // that makes a PCM5102 glitch.
+    if (rate_hz != current_sample_rate || current_sclk_mode != DAC_SCLK_INTERNAL) {
+        current_sample_rate = rate_hz;
+        audio_i2s_set_sample_rate(PIO_AUDIO, pio_sm, current_sample_rate);
+        dac_apply_sclk_mode(DAC_SCLK_INTERNAL, current_sample_rate);
+    }
+
+    dac_state = DAC_STATE_PLAYING;
+
+    // Not counting underruns yet -- see dss_primed above. If audio from a
+    // previous session is still queued, the first push below primes at once.
+    irq_set_enabled(DMA_IRQ_0, false);
+    stream_active = false;
+    dss_primed = false;
+    irq_set_enabled(DMA_IRQ_0, true);
+
+    bool pio_on = (PIO_AUDIO->ctrl & (1u << pio_sm)) != 0;
+    bool dma_on = dma_channel_is_busy(dma_chan_0) || dma_channel_is_busy(dma_chan_1);
+    if (!pio_on || !dma_on) {
+        dac_start_playback();
+    }
+}
+
+// Runs once per 7 kHz drain tick from the DSS session loop, so it executes
+// out of RAM and never calls into flash: a Sound Source program re-checks
+// nAck within a couple of microseconds of a strobe, and this call can land in
+// the middle of a burst. The DMA interrupt is masked straight through the
+// NVIC registers -- the same operations irq_set_enabled() performs, minus the
+// flash-resident call (enabling clears any stale pending bit first; DMA IRQ0
+// is level-sensitive, so a chunk that finished meanwhile re-pends at once).
+void __not_in_flash_func(subsys_dac_dss_push)(const uint8_t *samples, uint32_t n) {
+    const uint32_t dma_irq_mask = 1u << DMA_IRQ_0;
+
+    // The DMA IRQ's fill_dma_chunk() does a read-modify-write on
+    // ring_count; mask it while we do ours so neither update is lost.
+    nvic_hw->icer = dma_irq_mask;
+    for (uint32_t i = 0; i < n; i++) {
+        if (ring_count + 4u > DAC_RING_BUF_SIZE) {
+            dss_ring_drops++;
+            continue;
+        }
+        uint16_t v = (uint16_t)upsample_8_to_16(samples[i]);
+        uint8_t lo = (uint8_t)(v & 0xFFu);
+        uint8_t hi = (uint8_t)(v >> 8);
+        ring_buf[ring_head] = lo;
+        ring_buf[(ring_head + 1) % DAC_RING_BUF_SIZE] = hi;
+        ring_buf[(ring_head + 2) % DAC_RING_BUF_SIZE] = lo;   // right = left
+        ring_buf[(ring_head + 3) % DAC_RING_BUF_SIZE] = hi;
+        ring_head = (ring_head + 4) % DAC_RING_BUF_SIZE;
+        ring_count += 4u;
+    }
+    if (!dss_primed && ring_count >= DMA_CHUNK_SAMPLES * 4u) {
+        dss_primed = true;
+        stream_active = true;      // from here on a starved chunk is a real underrun
+    }
+    nvic_hw->icpr = dma_irq_mask;
+    nvic_hw->iser = dma_irq_mask;
+}
+
+void subsys_dac_dss_end(void) {
+    irq_set_enabled(DMA_IRQ_0, false);
+    stream_active = false;
+    dss_primed = false;
+    irq_set_enabled(DMA_IRQ_0, true);
+}
+
+uint32_t subsys_dac_dss_drops(void) {
+    return dss_ring_drops;
+}
+
+uint32_t subsys_dac_ring_queued_frames(void) {
+    return ring_count / 4u;
+}
+
+uint32_t subsys_dac_ring_free_frames(void) {
+    return (DAC_RING_BUF_SIZE - ring_count) / 4u;
+}
+
+uint32_t subsys_dac_underruns(void) {
+    return dac_underruns;
 }
 
 static bool handle_op_write(void) {

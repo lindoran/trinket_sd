@@ -5,8 +5,10 @@
 
 ROOT_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 PACKAGE_BASENAME := trinket_sd
-PACKAGE_DIR := $(ROOT_DIR)/dist
-PACKAGE_FILES := TRINKET.SYS SDTEST.EXE IFTEST.EXE trinket_sd.uf2
+PACKAGE_DIR := $(ROOT_DIR)/packages
+PACKAGE_FILES := TRINKET.SYS SDTEST.EXE IFTEST.EXE DACTEST.EXE DSSTEST.EXE DSSSTRES.EXE DSSCFG.EXE trinket_sd.uf2
+SOURCE_DIR := $(notdir $(ROOT_DIR))
+SOURCE_ARCHIVE := $(PACKAGE_DIR)/$(PACKAGE_BASENAME)-source.tar.gz
 
 .PHONY: all build package toolchain check-toolchain setup setup-firmware firmware build-firmware client build-client driver build-driver clean clean-all clean-firmware clean-driver clean-client help
 
@@ -16,14 +18,37 @@ build:
 	@"$(ROOT_DIR)/build.sh"
 
 package: build
-	@cd "$(PACKAGE_DIR)" && \
-		tar -czf "$(PACKAGE_BASENAME).tar.gz" $(PACKAGE_FILES) && \
-		7z a -t7z "$(PACKAGE_BASENAME).7z" $(PACKAGE_FILES) >/dev/null && \
-		zip -q "$(PACKAGE_BASENAME).zip" $(PACKAGE_FILES)
+	@mkdir -p "$(PACKAGE_DIR)"
+	@rm -f -- \
+		"$(PACKAGE_DIR)/$(PACKAGE_BASENAME).tar.gz" \
+		"$(PACKAGE_DIR)/$(PACKAGE_BASENAME).7z" \
+		"$(PACKAGE_DIR)/$(PACKAGE_BASENAME).zip" \
+		"$(SOURCE_ARCHIVE)"
+	@cd "$(ROOT_DIR)/dist" && \
+		tar -czf "$(PACKAGE_DIR)/$(PACKAGE_BASENAME).tar.gz" $(PACKAGE_FILES) && \
+		7z a -t7z "$(PACKAGE_DIR)/$(PACKAGE_BASENAME).7z" $(PACKAGE_FILES) >/dev/null && \
+		zip -q "$(PACKAGE_DIR)/$(PACKAGE_BASENAME).zip" $(PACKAGE_FILES)
+	@tar -czf "$(SOURCE_ARCHIVE)" \
+		--exclude="$(SOURCE_DIR)/.git" \
+		--exclude="$(SOURCE_DIR)/dist" \
+		--exclude="$(SOURCE_DIR)/packages" \
+		--exclude="$(SOURCE_DIR)/firmware/build" \
+		--exclude="$(SOURCE_DIR)/legacy/bc31" \
+		--exclude="$(SOURCE_DIR)/legacy/BC31" \
+		--exclude='*.EXE' \
+		--exclude='*.SYS' \
+		--exclude='*.uf2' \
+		--exclude='*.elf' \
+		--exclude='*.elf.map' \
+		--exclude='*.bin' \
+		--exclude='*.hex' \
+		--exclude='*.dis' \
+		-C "$(dir $(ROOT_DIR))" "$(SOURCE_DIR)"
 	@printf '%s\n' \
 		"Packaged artifacts: $(PACKAGE_DIR)/$(PACKAGE_BASENAME).tar.gz" \
 		"                    $(PACKAGE_DIR)/$(PACKAGE_BASENAME).7z" \
-		"                    $(PACKAGE_DIR)/$(PACKAGE_BASENAME).zip"
+		"                    $(PACKAGE_DIR)/$(PACKAGE_BASENAME).zip" \
+		"Packaged source:    $(SOURCE_ARCHIVE)"
 
 toolchain: check-toolchain
 
@@ -70,7 +95,7 @@ help:
 		'' \
 		'Build targets:' \
 		'  all, build       Build firmware, DOS driver, and DOS client tools' \
-		'  package          Build everything and create .tar.gz, .7z, and .zip archives' \
+		'  package          Build everything and create release + source archives in packages/' \
 		'  toolchain        Check dependencies and print setup suggestions' \
 		'  setup            Install or link firmware build dependencies' \
 		'  firmware         Build RP2040 firmware only' \

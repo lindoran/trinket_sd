@@ -57,6 +57,9 @@ extern DWORD partitionoffset;
 
 extern BYTE  sd_card_check;
 extern BYTE  portbase;
+extern BYTE  lock_sectors;
+extern WORD  dss_depth;
+extern WORD  dss_warmup;
 
 BYTE partition_number;
 
@@ -605,6 +608,27 @@ PRIVATE BOOLEAN parse_options (char far *p)
             cdprintf("SD: Invalid port base index %x\n",temp);
         else
             portbase = temp;
+   break;
+      case 'l', 'L':
+        if ((p=option_value(p,&temp)) == NULL)  return FALSE;
+        if (temp > 64)
+            cdprintf("SD: Invalid sectors-per-lock %x (0-64)\n",temp);
+        else
+            lock_sectors = (BYTE) temp;
+   break;
+      case 'f', 'F':
+        if ((p=option_value(p,&temp)) == NULL)  return FALSE;
+        if ((temp != 0) && ((temp < 16) || (temp > 512)))
+            cdprintf("SD: Invalid Sound Source depth %d (16-512, or 0 = default)\n",(int)temp);
+        else
+            dss_depth = temp;
+   break;
+      case 'w', 'W':
+        if ((p=option_value(p,&temp)) == NULL)  return FALSE;
+        if (temp > 2000)
+            cdprintf("SD: Invalid Sound Source warm-up %d ms (0-2000)\n",(int)temp);
+        else
+            dss_warmup = temp;
    break;
       default:
         return FALSE;

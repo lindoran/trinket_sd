@@ -60,6 +60,7 @@
 #define DISPATCH_CMD_SPI           0x02u   /* see subsys_spi.h */
 #define DISPATCH_CMD_SD            0x03u   /* see subsys_sd.h */
 #define DISPATCH_CMD_DAC           0x04u   /* see subsys_dac.h */
+#define DISPATCH_CMD_DSS           0x05u   /* Disney Sound Source configuration, see subsys_dss.h */
 
 /* Waits for and handles exactly one dispatch cycle: block for the
  * command byte's Init pulse, read the byte, then hand off the very next

@@ -93,6 +93,7 @@
 #include "subsys_spi.h"
 #include "subsys_sd.h"
 #include "subsys_dac.h"
+#include "subsys_dss.h"
 
 #define KEY_ESC  0x1Bu
 
@@ -121,6 +122,7 @@ static void poll_debug_toggle(void) {
     subsys_spi_set_debug(debug_on);
     subsys_sd_set_debug(debug_on);
     subsys_dac_set_debug(debug_on);
+    subsys_dss_set_debug(debug_on);
 
     // Print full hardware diagnostics (always, regardless of debug_on).
     printf("\n============================================================\n");
@@ -136,6 +138,8 @@ static void poll_debug_toggle(void) {
     subsys_sd_dump_diagnostics();
     printf("\n");
     subsys_dac_dump_diagnostics();
+    printf("\n");
+    subsys_dss_dump_diagnostics();
     printf("============================================================\n");
     printf("  Resetting all subsystems to known idle state...\n");
 
@@ -146,6 +150,7 @@ static void poll_debug_toggle(void) {
     subsys_spi_reset();
     subsys_sd_reset();
     subsys_dac_reset();  // clears ring buffer, cancels tone, restores silence-playing state
+    subsys_dss_reset();
 
     // Park LPT wire output lines to idle levels immediately, so the
     // next dispatch_run_one() starts with ERROR=0 and nibbles=0.
@@ -169,6 +174,7 @@ int main(void) {
     subsys_spi_init();       // bring up SPI0 (GPIO0-3) + CS at the safe default rate/mode
     subsys_sd_init();        // redundant hardware bring-up, same pins -- see subsys_sd.h
     subsys_dac_init();       // bring up DAC subsystem (PIO I2S + DMA + SCLK)
+    subsys_dss_init();       // Disney Sound Source capture (PIO1) -- after wire_setup_pins()
     wire_setup_reset_irq();
 
     // Startup hardware test beep (896 Hz, 200 ms) -- plays immediately on boot
@@ -184,6 +190,16 @@ int main(void) {
     printf("============================================================\n\n");
 
     while (true) {
+        // Disney Sound Source: a game that talks to the parallel port
+        // directly holds nAuto-LF and nInit both HIGH (see wire.h's
+        // wire_dss_signature()). That is checked BEFORE reset_pending:
+        // the power-up write edges nAuto-LF, so the reset IRQ fires on
+        // every DSS entry too, and the two must not be confused.
+        if (wire_dss_signature()) {
+            subsys_dss_run_session();
+            continue;
+        }
+
         // Checked first, every iteration: covers reset asserted between
         // dispatch cycles AND a dispatch cycle (or the subsystem it
         // called into) aborting early because wire_reset_pending() went
@@ -191,15 +207,36 @@ int main(void) {
         // flag still set and run the same sequence before touching the
         // wire again.
         if (wire_reset_pending()) {
-            wire_do_reset_sequence();
+            // nAuto-LF and nInit are written by one OUT but travel through
+            // different level-shifter channels; give a DSS power-up a few
+            // microseconds to settle before deciding this is a reset.
+            busy_wait_us(5);
+            if (wire_dss_signature()) {
+                continue;   // top of loop starts the DSS session
+            }
+            if (!wire_do_reset_sequence()) {
+                continue;   // turned out to be a DSS power-up after all
+            }
             subsys_testharness_reset();
             subsys_spi_reset();
             subsys_sd_reset();
             subsys_dac_reset();
+            subsys_dss_reset();
             continue;
         }
 
-        poll_debug_toggle();
+        // The console only needs checking every so often. Polling USB on every
+        // pass put it (and whatever TinyUSB is doing) between the end of a
+        // transaction and the next wait for the wire, i.e. right where a
+        // Sound Source session starts.
+        {
+            static uint32_t next_poll_us = 0;
+            uint32_t now_us = time_us_32();
+            if ((int32_t)(now_us - next_poll_us) >= 0) {
+                next_poll_us = now_us + 20000u;
+                poll_debug_toggle();
+            }
+        }
 
         if (!dispatch_run_one()) {
             continue;   // wire_reset_pending() fired; handled at top of loop

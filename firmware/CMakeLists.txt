@@ -52,9 +52,13 @@ add_executable(trinket_sd
     src/subsys_spi.c
     src/subsys_sd.c
     src/subsys_dac.c
+    src/dss_model.c
+    src/dss_cmd.c
+    src/subsys_dss.c
 )
 
 pico_generate_pio_header(trinket_sd ${CMAKE_CURRENT_LIST_DIR}/src/audio_i2s.pio)
+pico_generate_pio_header(trinket_sd ${CMAKE_CURRENT_LIST_DIR}/src/dss_capture.pio)
 
 # hardware_spi drives the H3 header's real SPI0 peripheral for subsys_spi/sd.
 # hardware_pio + hardware_dma + hardware_pwm drive the I2S PCM5102 audio DAC on GPIO16,17,27,26.

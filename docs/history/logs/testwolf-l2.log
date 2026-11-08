@@ -1,0 +1,23 @@
+=~=~=~=~=~=~=~=~=~=~=~= PuTTY log 2026.11.01 19:38:42 =~=~=~=~=~=~=~=~=~=~=~=
+
+[Disney Sound Source emulation]
+  Signature now:   PRESENT (game owns the port) (nAuto-LF=1 nInit=1)
+  Sessions:        109 (last one 6157 ms)
+  Strobes captured: 183523
+  FIFO model:     level=0/16 max=16 accepted=183397 overflow(dropped)=126
+  Drain ticks:    played=183397 held(empty)=174068 resyncs=0 gap-drained=1290
+  Entry path:     capture armed by edge IRQ=108, by main loop=1 | PIO FIFO already full at entry=0
+  Edge->session (us): <10:107 <25:1 <50:0 <100:0 <250:0 >=250:0 | avg=1 max=11
+  DAC ring:       60 frames queued | dropped(ring full)=0 | underruns=0
+
+
+[Disney Sound Source emulation]
+  Signature now:   PRESENT (game owns the port) (nAuto-LF=1 nInit=1)
+  Sessions:        109 (last one 6157 ms)
+  Strobes captured: 183523
+  FIFO model:     level=0/16 max=16 accepted=183397 overflow(dropped)=126
+  Drain ticks:    played=183397 held(empty)=279059 resyncs=1 gap-drained=1290
+  Entry path:     capture armed by edge IRQ=108, by main loop=1 | PIO FIFO already full at entry=0
+  Edge->session (us): <10:107 <25:1 <50:0 <100:0 <250:0 >=250:0 | avg=1 max=11
+  DAC ring:       347 frames queued | dropped(ring full)=0 | underruns=1
+

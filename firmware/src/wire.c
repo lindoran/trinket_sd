@@ -10,22 +10,28 @@
 #include "debug.h"
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
+#include "hardware/irq.h"
+#include "hardware/structs/iobank0.h"
+#include "hardware/structs/sio.h"
+#include "hardware/structs/timer.h"
 
 // ---------------------------------------------------------------------
 // Pin assignments -- doc sec 2, identical to trinket_firmware/src/main.c
 // ---------------------------------------------------------------------
-#define PIN_DATA_BASE     4    // D0-D7, GPIO 4-11, LPT->Pico (input)
+#define PIN_DATA_BASE     WIRE_GPIO_DATA_BASE    // D0-D7, GPIO 4-11, LPT->Pico (input)
 #define PIN_DATA_COUNT    8
 
 #define PIN_STROBE       12    // nStrobe, LPT->Pico (input), read-dir nibble select
-#define PIN_RESET        13    // nAuto-LF, LPT->Pico (input), host-driven reset
+#define PIN_RESET        WIRE_GPIO_NAUTOLF    // nAuto-LF, LPT->Pico (input), host-driven reset
                                 // (hw-inverted: idle=LOW, asserted=HIGH -- see
                                 // wire_do_reset_sequence()'s comment below)
-#define PIN_INIT         14    // nInit, LPT->Pico (input), host-driven semaphore
-#define PIN_SELECT_IN    15    // nSelect-In, LPT->Pico (input), direction latch
+#define PIN_INIT         WIRE_GPIO_NINIT    // nInit, LPT->Pico (input), host-driven semaphore
+#define PIN_SELECT_IN    WIRE_GPIO_SELECT_IN    // nSelect-In, LPT->Pico (input), direction latch
+                                // (also the Disney Sound Source strobe -- see subsys_dss.c)
 
 #define PIN_NIBBLE_BASE  18    // Busy/Ack/PaperOut/Select, GPIO 18-21 (output)
 #define PIN_NIBBLE_COUNT  4
+#define PIN_NACK         WIRE_GPIO_NACK   // nAck = nibble pin index 1 (GPIO19); DSS FIFO-full in a DSS session
 #define PIN_ERROR        22    // nError, Pico->LPT (output), device-driven semaphore
 
 // ---------------------------------------------------------------------
@@ -60,11 +66,50 @@ static volatile bool reset_pending = false;
 
 static volatile uint32_t timeout_count = 0;
 
-static void reset_isr(uint gpio, uint32_t events) {
-    (void)events;
-    if (gpio == PIN_RESET) {
+// Rising edges seen on nAuto-LF, and reset sequences that ran to completion.
+// Every DSS session entry edges nAuto-LF too, so reset_irq_count minus the DSS
+// session count is the number of "real" resets requested; resets_completed
+// should track it. A gap between the two, or resets climbing during a run that
+// never resets the driver, points at a game's port writes being mistaken for a
+// reset.
+static volatile uint32_t reset_irq_count = 0;
+static volatile uint32_t resets_completed = 0;
+
+// The nAuto-LF edge is time-critical: a DSS-aware game starts strobing within
+// microseconds of the control write that raised it, and the Pico has to be
+// listening by then. So this is NOT the SDK's gpio callback path
+// (gpio_default_irq_handler lives in flash and can take cache-miss stalls
+// of tens of microseconds on a cold hit), but our own exclusive handler for
+// the GPIO bank: RAM-resident, top NVIC priority so it preempts USB and the
+// audio DMA interrupt, and it acknowledges the edge by writing the INTR
+// register directly. nAuto-LF rising is the only GPIO event enabled in the
+// whole firmware.
+static void (*volatile sig_hook)(void) = NULL;
+static volatile uint32_t edge_time_us = 0;
+
+static void __not_in_flash_func(bank0_irq_handler)(void) {
+    const uint reg = PIN_RESET / 8u;
+    const uint32_t mask = (uint32_t)GPIO_IRQ_EDGE_RISE << (4u * (PIN_RESET % 8u));
+
+    if (iobank0_hw->proc0_irq_ctrl.ints[reg] & mask) {
+        iobank0_hw->intr[reg] = mask;               // edge events clear on write-1
+        edge_time_us = timer_hw->timerawl;
         reset_pending = true;
+        reset_irq_count++;
+        // nInit already high too = Sound Source signature (see wire.h):
+        // let the DSS code arm its strobe capture right now.
+        if (sig_hook != NULL && (sio_hw->gpio_in & (1u << PIN_INIT))) {
+            sig_hook();
+        }
     }
+}
+
+void wire_set_signature_hook(void (*fn)(void)) {
+    sig_hook = fn;
+}
+
+uint32_t wire_last_edge_us(void) {
+    return edge_time_us;
 }
 
 bool wire_reset_pending(void) {
@@ -144,6 +189,15 @@ bool wire_wait_for_command(void) {
         }
         tight_loop_contents();
     }
+    // nInit HIGH means "command in flight" only when nAuto-LF is LOW. With
+    // nAuto-LF HIGH as well this is a DSS-aware program's power-up (the
+    // edge on nAuto-LF normally gets here first via reset_pending, but a
+    // host that was already holding nAuto-LF high produces no edge) --
+    // return false so main.c's loop notices the signature and starts a
+    // DSS session instead of reading the game's data byte as a command.
+    if (gpio_get(PIN_RESET)) {
+        return false;
+    }
     return true;
 }
 
@@ -195,8 +249,10 @@ void wire_setup_pins(void) {
 void wire_setup_reset_irq(void) {
     gpio_init(PIN_RESET);
     gpio_set_dir(PIN_RESET, GPIO_IN);
-    gpio_set_irq_enabled_with_callback(PIN_RESET, GPIO_IRQ_EDGE_RISE, true,
-                                        &reset_isr);
+    gpio_set_irq_enabled(PIN_RESET, GPIO_IRQ_EDGE_RISE, true);
+    irq_set_exclusive_handler(IO_IRQ_BANK0, bank0_irq_handler);
+    irq_set_priority(IO_IRQ_BANK0, 0x00);          // highest: above USB (0x80) and DMA (0x80)
+    irq_set_enabled(IO_IRQ_BANK0, true);
 }
 
 // ---------------------------------------------------------------------
@@ -247,13 +303,21 @@ bool wire_finish_read_cycle(uint8_t low_nibble, uint8_t high_nibble) {
 // asserting reset (control bit1=0) puts it HIGH -- so on the Pico side,
 // "reset asserted" == GPIO13 reads HIGH, "reset released" == GPIO13
 // reads LOW.
-void wire_do_reset_sequence(void) {
+bool wire_do_reset_sequence(void) {
     debug_printf("RESET: nAuto-LF asserted, entering known state\n");
 
     gpio_put(PIN_ERROR, 0);
     write_nibble(0);
 
     while (gpio_get(PIN_RESET)) {
+        // nInit going HIGH while nAuto-LF is still HIGH is the DSS
+        // signature, not a reset (a real reset drives nInit LOW -- see
+        // wire_dss_signature()). Hand back to main.c without clearing
+        // anything.
+        if (gpio_get(PIN_INIT)) {
+            debug_printf("RESET: nInit high with nAuto-LF high -- DSS signature, not a reset\n");
+            return false;
+        }
         tight_loop_contents();
     }
 
@@ -262,8 +326,34 @@ void wire_do_reset_sequence(void) {
     // clear it is still caught (IRQ just sets it true again; nothing
     // here depends on precise timing).
     reset_pending = false;
+    resets_completed++;
 
     debug_printf("RESET: nAuto-LF released, resuming normal operation\n");
+    return true;
+}
+
+bool wire_dss_signature(void) {
+    // One atomic snapshot of all GPIO inputs, not two gpio_get() calls --
+    // a game's single OUT can move both lines at once, and a torn read
+    // between them would look like a reset (pin 14 high, pin 16 low).
+    uint32_t g = gpio_get_all();
+    return (g & (1u << PIN_RESET)) && (g & (1u << PIN_INIT));
+}
+
+bool wire_reset_line_high(void) {
+    return gpio_get(PIN_RESET) != 0;
+}
+
+void wire_request_reset(void) {
+    reset_pending = true;
+}
+
+void wire_clear_reset_pending(void) {
+    reset_pending = false;
+}
+
+void wire_set_nack(bool high) {
+    gpio_put(PIN_NACK, high ? 1 : 0);
 }
 
 void wire_dump_diagnostics(void) {
@@ -286,6 +376,8 @@ void wire_dump_diagnostics(void) {
            gpio_get(PIN_NIBBLE_BASE + 2), gpio_get(PIN_NIBBLE_BASE + 3));
     printf("  Transport timeouts (WIRE_TIMEOUT_US=%u): %lu\n",
            (unsigned)WIRE_TIMEOUT_US, (unsigned long)timeout_count);
+    printf("  nAuto-LF rising edges: %lu | reset sequences completed: %lu\n",
+           (unsigned long)reset_irq_count, (unsigned long)resets_completed);
 }
 
 void wire_park_outputs(void) {

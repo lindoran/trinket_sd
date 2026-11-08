@@ -90,6 +90,27 @@ bool subsys_dac_run(void);
 void subsys_dac_service(void);
 void subsys_dac_set_debug(bool enabled);
 
+/* Disney Sound Source emulation sink (subsys_dss.c) -- NOT part of the
+ * DISPATCH_CMD_DAC wire protocol; firmware-internal only.
+ *
+ *   begin: set the I2S rate, mark the stream live (so a starved ring is
+ *          counted as an underrun again). Does not flush the ring.
+ *   push:  append n UNSIGNED 8-bit mono samples (midpoint 128) to the
+ *          ring as stereo 16-bit frames, same conversion as DAC_OP_WRITE
+ *          in 8-bit mono mode. Never blocks: if the ring has no room the
+ *          excess samples are dropped and counted (see _drops), because
+ *          the caller is a timing-critical loop that must keep servicing
+ *          the LPT strobe capture.
+ *   end:   clears the stream flag; queued audio still plays out.
+ */
+void subsys_dac_dss_begin(uint32_t rate_hz);
+void subsys_dac_dss_push(const uint8_t *samples, uint32_t n);
+void subsys_dac_dss_end(void);
+uint32_t subsys_dac_dss_drops(void);          /* samples dropped: ring full */
+uint32_t subsys_dac_ring_queued_frames(void); /* stereo frames waiting in the ring */
+uint32_t subsys_dac_ring_free_frames(void);   /* stereo frames of room left in the ring */
+uint32_t subsys_dac_underruns(void);          /* same counter DAC_OP_STATUS reports */
+
 /* Hardware Diagnostic & Tone Functions */
 void subsys_dac_play_tone(uint16_t freq_hz, uint16_t duration_ms, uint8_t sclk_mode);
 void subsys_dac_dump_diagnostics(void);

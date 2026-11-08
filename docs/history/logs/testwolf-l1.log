@@ -1,0 +1,159 @@
+=~=~=~=~=~=~=~=~=~=~=~= PuTTY log 2026.11.01 19:47:22 =~=~=~=~=~=~=~=~=~=~=~=
+
+[Disney Sound Source emulation]
+  Signature now:   PRESENT (game owns the port) (nAuto-LF=1 nInit=1)
+  Sessions:        358 (last one 25038 ms)
+  Strobes captured: 518505
+  FIFO model:     level=0/16 max=16 accepted=518259 overflow(dropped)=246
+  Drain ticks:    played=518259 held(empty)=357376 resyncs=0 gap-drained=4444
+  Entry path:     capture armed by edge IRQ=357, by main loop=1 | PIO FIFO already full at entry=0
+  Edge->session (us): <10:357 <25:0 <50:0 <100:0 <250:0 >=250:0 | avg=1 max=4
+  DAC ring:       303 frames queued | dropped(ring full)=0 | underruns=0
+
+
+[Disney Sound Source emulation]
+  Signature now:   PRESENT (game owns the port) (nAuto-LF=1 nInit=1)
+  Sessions:        358 (last one 25038 ms)
+  Strobes captured: 518505
+  FIFO model:     level=0/16 max=16 accepted=518259 overflow(dropped)=246
+  Drain ticks:    played=518259 held(empty)=394993 resyncs=1 gap-drained=4444
+  Entry path:     capture armed by edge IRQ=357, by main loop=1 | PIO FIFO already full at entry=0
+  Edge->session (us): <10:357 <25:0 <50:0 <100:0 <250:0 >=250:0 | avg=1 max=4
+  DAC ring:       288 frames queued | dropped(ring full)=0 | underruns=0
+
+
+============================================================
+              TRINKET HARDWARE DIAGNOSTICS                  
+============================================================
+  clk_sys = 125 MHz | uptime = 446255 ms | debug logging: ON
+------------------------------------------------------------
+[LPT Parallel Link Status]
+  Data Bus (D0-D7, GPIO 4-11): 0x03
+  nSTROBE    (GPIO 12): 1 (Read nibble select: HIGH)
+  nRESET     (GPIO 13): 0 (Asserted/Pending: NO)
+  nINIT      (GPIO 14): 1 (Transfer semaphore)
+  nSELECT_IN (GPIO 15): 1 (Direction: WRITE)
+  nERROR     (GPIO 22): 0 (Device ready handshake)
+  Nibble Out (GPIO 18-21): BUSY=0 PE=0 SEL=1 ACK=0
+  Transport timeouts (WIRE_TIMEOUT_US=250000): 0
+  nAuto-LF rising edges: 358 | reset sequences completed: 1
+
+[SD / SPI Subsystem Status (SPI0 on H3 Header)]
+  GPIO0 (MISO/RX):  1 (func 1)
+  GPIO1 (CS):       1 (manual CS: DEASSERTED)
+  GPIO2 (SCK):      0 (func 1)
+  GPIO3 (MOSI/TX):  0 (func 1)
+  Card Initialized: YES
+  Card Specs:       SD v2 (or higher), Block-addressed (SDHC/SDXC)
+  Last Transaction: Status=OK (0x00), Payload=0 bytes
+
+[I2S Audio DAC Subsystem Status (PCM5102)]
+  GPIO16 (BCK):   0 (Bit Clock, func 6)
+  GPIO17 (LRCK):  1 (Left/Right Word Select, func 6)
+  GPIO27 (DIN):   0 (Data Out to DAC DIN, func 6)
+  GPIO26 (SCLK):  0 (Master Clock, func 5) -> Mode: INTERNAL PLL (GPIO26 LOW)
+  PIO0 SM0:      RUNNING (PC: 0x1D, TX FIFO Level: 8/8)
+  DMA Chan 0:    Busy: NO | Remaining Count: 0
+  DMA Chan 1:    Busy: YES | Remaining Count: 25
+  Engine State:   PLAYING | 7000 Hz | 2 Channels | 16-bit
+  Ring Buffer:    208 bytes queued (16176 bytes free)
+  Audio Metrics:  Frames Played: 3179264 | Buffer Underruns: 0
+  Tone Generator: Active: NO (Remaining Samples: 0)
+
+  [PCM5102 Breakout Wiring & Hardware Checklist]
+    * VIN  -> RP2040 3.3V (Pin 36 / 3V3_OUT)
+    * GND  -> RP2040 GND
+    * BCK  -> RP2040 GPIO16
+    * LRCK -> RP2040 GPIO17
+    * DIN  -> RP2040 GPIO27
+    * SCLK -> RP2040 GPIO26 (held LOW for internal PLL mode)
+    * XMT  -> MUST be connected to 3.3V (HIGH) or Jumper 3 soldered to 'H'.
+              (WARNING: If XMT is floating or LOW, PCM5102 hard-mutes audio!)
+    * FMT  -> Connect to GND (I2S standard Philips format)
+    * FLT  -> Connect to GND (Normal latency filter)
+    * DMP  -> Connect to GND (De-emphasis off)
+
+[Disney Sound Source emulation]
+  Signature now:   absent (dispatcher owns the port) (nAuto-LF=0 nInit=0)
+  Sessions:        358 (last one 31396 ms)
+  Strobes captured: 518505
+  FIFO model:     level=0/16 max=16 accepted=518259 overflow(dropped)=246
+  Drain ticks:    played=518259 held(empty)=524805 resyncs=2 gap-drained=4444
+  Entry path:     capture armed by edge IRQ=357, by main loop=1 | PIO FIFO already full at entry=0
+  Edge->session (us): <10:357 <25:0 <50:0 <100:0 <250:0 >=250:0 | avg=1 max=4
+  DAC ring:       52 frames queued | dropped(ring full)=0 | underruns=0
+============================================================
+  Resetting all subsystems to known idle state...
+DAC: SCLK internal PLL mode (GPIO26 held LOW)
+  Triggering 1000Hz 200ms test beep...
+============================================================
+
+DAC: SCLK internal PLL mode (GPIO26 held LOW)
+DAC: TONE freq=1000 Hz duration=200 ms sclk=0 rate=7000
+SD: read result status=1 len=0
+
+============================================================
+              TRINKET HARDWARE DIAGNOSTICS                  
+============================================================
+  clk_sys = 125 MHz | uptime = 446278 ms | debug logging: OFF
+------------------------------------------------------------
+[LPT Parallel Link Status]
+  Data Bus (D0-D7, GPIO 4-11): 0x03
+  nSTROBE    (GPIO 12): 1 (Read nibble select: HIGH)
+  nRESET     (GPIO 13): 0 (Asserted/Pending: NO)
+  nINIT      (GPIO 14): 1 (Transfer semaphore)
+  nSELECT_IN (GPIO 15): 1 (Direction: WRITE)
+  nERROR     (GPIO 22): 0 (Device ready handshake)
+  Nibble Out (GPIO 18-21): BUSY=1 PE=0 SEL=0 ACK=0
+  Transport timeouts (WIRE_TIMEOUT_US=250000): 0
+  nAuto-LF rising edges: 358 | reset sequences completed: 1
+
+[SD / SPI Subsystem Status (SPI0 on H3 Header)]
+  GPIO0 (MISO/RX):  1 (func 1)
+  GPIO1 (CS):       1 (manual CS: DEASSERTED)
+  GPIO2 (SCK):      0 (func 1)
+  GPIO3 (MOSI/TX):  0 (func 1)
+  Card Initialized: YES
+  Card Specs:       SD v2 (or higher), Block-addressed (SDHC/SDXC)
+  Last Transaction: Status=ERROR (0x01), Payload=0 bytes
+
+[I2S Audio DAC Subsystem Status (PCM5102)]
+  GPIO16 (BCK):   0 (Bit Clock, func 6)
+  GPIO17 (LRCK):  1 (Left/Right Word Select, func 6)
+  GPIO27 (DIN):   0 (Data Out to DAC DIN, func 6)
+  GPIO26 (SCLK):  0 (Master Clock, func 5) -> Mode: INTERNAL PLL (GPIO26 LOW)
+  PIO0 SM0:      RUNNING (PC: 0x1E, TX FIFO Level: 8/8)
+  DMA Chan 0:    Busy: YES | Remaining Count: 118
+  DMA Chan 1:    Busy: NO | Remaining Count: 0
+  Engine State:   PLAYING | 7000 Hz | 2 Channels | 16-bit
+  Ring Buffer:    0 bytes queued (16384 bytes free)
+  Audio Metrics:  Frames Played: 3179520 | Buffer Underruns: 0
+  Tone Generator: Active: YES (Remaining Samples: 1400)
+
+  [PCM5102 Breakout Wiring & Hardware Checklist]
+    * VIN  -> RP2040 3.3V (Pin 36 / 3V3_OUT)
+    * GND  -> RP2040 GND
+    * BCK  -> RP2040 GPIO16
+    * LRCK -> RP2040 GPIO17
+    * DIN  -> RP2040 GPIO27
+    * SCLK -> RP2040 GPIO26 (held LOW for internal PLL mode)
+    * XMT  -> MUST be connected to 3.3V (HIGH) or Jumper 3 soldered to 'H'.
+              (WARNING: If XMT is floating or LOW, PCM5102 hard-mutes audio!)
+    * FMT  -> Connect to GND (I2S standard Philips format)
+    * FLT  -> Connect to GND (Normal latency filter)
+    * DMP  -> Connect to GND (De-emphasis off)
+
+[Disney Sound Source emulation]
+  Signature now:   absent (dispatcher owns the port) (nAuto-LF=0 nInit=0)
+  Sessions:        358 (last one 31396 ms)
+  Strobes captured: 518505
+  FIFO model:     level=0/16 max=16 accepted=518259 overflow(dropped)=246
+  Drain ticks:    played=518259 held(empty)=524805 resyncs=2 gap-drained=4444
+  Entry path:     capture armed by edge IRQ=357, by main loop=1 | PIO FIFO already full at entry=0
+  Edge->session (us): <10:357 <25:0 <50:0 <100:0 <250:0 >=250:0 | avg=1 max=4
+  DAC ring:       0 frames queued | dropped(ring full)=0 | underruns=0
+============================================================
+  Resetting all subsystems to known idle state...
+  Triggering 1000Hz 200ms test beep...
+============================================================
+

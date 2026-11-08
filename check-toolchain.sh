@@ -37,7 +37,13 @@ done
 printf '\nRP2040 firmware toolchain:\n'
 command_check arm-none-eabi-gcc
 file_check "$SDK_PATH/pico_sdk_init.cmake" "Pico SDK 2.3.0"
-file_check "$PICOTOOL_PATH" "picotool 2.3.0"
+# picotool is optional: the Pico SDK fetches and builds it from source on
+# the first firmware build if it is not installed (see TOOLCHAIN.md).
+if [ -e "$PICOTOOL_PATH" ] || command -v picotool >/dev/null 2>&1; then
+    printf '  [ok]      picotool\n'
+else
+    printf '  [note]    picotool not installed (optional: the Pico SDK builds it on first use)\n'
+fi
 
 printf '\nDOS toolchain (driver + diagnostic clients, Borland C++ 3.1 under dosbox):\n'
 command_check dosbox
@@ -55,7 +61,7 @@ if [ "$missing" -eq 0 ]; then
 fi
 
 printf '%d dependency check(s) failed. Suggested next steps:\n' "$missing"
-printf '  Firmware: install gcc-arm-none-eabi, cmake, git, and picotool; or set PICO_SDK_PATH to a Pico SDK 2.3.0 checkout.\n'
+printf '  Firmware: install gcc-arm-none-eabi, cmake and git; or set PICO_SDK_PATH to a Pico SDK 2.3.0 checkout.\n'
 printf '  DOS toolchain (driver + clients): install dosbox and provide a legally obtained Borland C++ 3.1 copy under legacy/bc31/.\n'
 printf '  Packaging: install tar, 7z (p7zip), and zip.\n'
 exit 1

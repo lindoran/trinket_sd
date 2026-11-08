@@ -7,6 +7,7 @@
 !/legacy/BC31/.gitkeep
 
 /firmware/build/
+/packages/
 
 # Firmware build products, wherever a build directory is configured.
 *.elf
@@ -16,3 +17,4 @@
 *.hex
 *.dis
 *.EXE
+*.SYS

@@ -94,8 +94,8 @@ elif grep -qE 'Fatal|Illegal command' "$LOG"; then
     cat "$LOG" >&2
 fi
 
-if [ ! -f "$WORK_DIR/d/SDTEST.EXE" ] || [ ! -f "$WORK_DIR/d/IFTEST.EXE" ] || [ ! -f "$WORK_DIR/d/DACTEST.EXE" ]; then
-    printf 'error: SDTEST.EXE, IFTEST.EXE, and/or DACTEST.EXE were not produced. Full log:\n' >&2
+if [ ! -f "$WORK_DIR/d/SDTEST.EXE" ] || [ ! -f "$WORK_DIR/d/IFTEST.EXE" ] || [ ! -f "$WORK_DIR/d/DACTEST.EXE" ] || [ ! -f "$WORK_DIR/d/DSSTEST.EXE" ] || [ ! -f "$WORK_DIR/d/DSSSTRES.EXE" ] || [ ! -f "$WORK_DIR/d/DSSCFG.EXE" ]; then
+    printf 'error: SDTEST.EXE, IFTEST.EXE, DACTEST.EXE, DSSTEST.EXE, DSSSTRES.EXE, and/or DSSCFG.EXE were not produced. Full log:\n' >&2
     cat "$LOG" >&2
     exit 1
 fi
@@ -104,6 +104,12 @@ mkdir -p "$DIST_DIR"
 cp "$WORK_DIR/d/SDTEST.EXE" "$DIST_DIR/SDTEST.EXE"
 cp "$WORK_DIR/d/IFTEST.EXE" "$DIST_DIR/IFTEST.EXE"
 cp "$WORK_DIR/d/DACTEST.EXE" "$DIST_DIR/DACTEST.EXE"
+cp "$WORK_DIR/d/DSSTEST.EXE" "$DIST_DIR/DSSTEST.EXE"
+cp "$WORK_DIR/d/DSSSTRES.EXE" "$DIST_DIR/DSSSTRES.EXE"
+cp "$WORK_DIR/d/DSSCFG.EXE" "$DIST_DIR/DSSCFG.EXE"
 printf '\nBuilt client: %s\n' "$DIST_DIR/SDTEST.EXE"
 printf 'Built client: %s\n' "$DIST_DIR/IFTEST.EXE"
 printf 'Built client: %s\n' "$DIST_DIR/DACTEST.EXE"
+printf 'Built client: %s\n' "$DIST_DIR/DSSTEST.EXE"
+printf 'Built client: %s\n' "$DIST_DIR/DSSSTRES.EXE"
+printf 'Built client: %s\n' "$DIST_DIR/DSSCFG.EXE"

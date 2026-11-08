@@ -52,6 +52,12 @@
 
 BYTE sd_card_check = 0;   /* /k -- accepted, not implemented */
 BYTE portbase = 2;        /* /b -- index into port_bases[], default 0x378 */
+WORD dss_depth = 0;       /* /f -- Sound Source FIFO depth to ask the trinket for;
+                           *       0 = don't send anything, leave it at its default (16) */
+WORD dss_warmup = 250;    /* /w -- ms a freshly powered-up program sees the real
+                           *       16-byte FIFO before /f takes over (see DSS.md) */
+BYTE lock_sectors = 1;    /* /l -- max sectors moved per interrupts-off window
+                           *       (0 = never disable interrupts). See wire_lock(). */
 
 static WORD port_bases[5] = {0x3BCu, 0x378u, 0x278u, 0x3E8u, 0x2E8u};
 static WORD base_port = 0x378u;
@@ -82,6 +88,11 @@ static WORD base_port = 0x378u;
 #define REG_CONTROL  2
 
 #define POLL_TIMEOUT_ITERS  60000u
+
+/* Largest sector count the firmware accepts in one SD_OP_READ/WRITE_SECTORS
+ * (subsys_sd.h). Defined up here because the wire lock below sizes its
+ * chunks against it. */
+#define SD_MAX_SECTORS  64u
 #define IO_DELAY_ITERS      4
 
 static BYTE ctrl_shadow = CTRL_IDLE_DEFAULT;
@@ -139,6 +150,68 @@ static void host_reset(void)
    reset_hold_delay();
    ctrl_out(CTRL_IDLE_DEFAULT);
    io_delay();
+}
+
+/* ---------------------------------------------------------------------
+ * Wire lock: keep other programs' interrupt handlers off the port while a
+ * transaction is in flight.
+ *
+ * The parallel port is shared with whatever else is running. A game that
+ * already knows how to drive a Disney Sound Source (which the trinket now
+ * emulates -- see DSS.md) feeds it from a timer interrupt handler that
+ * writes the data and control registers as ABSOLUTE values, at any
+ * instruction boundary. If that handler fires inside one of our
+ * handshakes:
+ *   - between `OUT data` and `ctrl_out(INIT_RAISED)` in raw_send_byte(),
+ *     the game's sample byte is on the data pins when Init rises and the
+ *     trinket latches it in place of ours (a wrong command, LBA or sector
+ *     byte, with no error at all);
+ *   - between the nibble-select write and the status read in the
+ *     receive paths, the handler's control write flips the select and we
+ *     read the wrong nibble;
+ *   - anywhere, its 04h/0Ch control writes put nAuto-LF and nInit high,
+ *     which the firmware takes for a Sound Source power-up and abandons
+ *     the transaction -- and this driver never retries, so DOS gets an
+ *     error.
+ * ctrl_shadow puts OUR control lines back afterwards, but nothing can
+ * repair the data pins or an abandoned transaction.
+ *
+ * So every transaction that moves data runs with interrupts disabled, and
+ * disk_read()/disk_write() split large requests into chunks of at most
+ * lock_sectors sectors with interrupts re-enabled between chunks, so a
+ * pending game interrupt (and the timer and keyboard) get serviced at
+ * chunk boundaries instead of waiting out a whole 64-sector read. The
+ * flags are saved and restored, not blindly STI'd: this driver can be
+ * entered with interrupts already off.
+ *
+ * Costs: while a chunk runs, a Sound Source stream is starved (the real
+ * unit's FIFO is only 16 bytes, so any window longer than ~2 ms is a
+ * gap) and the system timer can lose a tick once a window outlasts
+ * ~55 ms. Smaller /l = shorter windows, slightly more per-chunk overhead.
+ * /l=0 turns the lock off entirely (full-size transfers, interrupts left
+ * alone) for machines that never run Sound Source software.
+ *
+ * Not locked: SD_OP_INIT (card bring-up can take a long time; nothing is
+ * streaming at that point).
+ * --------------------------------------------------------------------- */
+static WORD wire_lock(void)
+{
+   WORD fl = _FLAGS;
+   if (lock_sectors != 0) disable();
+   return fl;
+}
+
+static void wire_unlock(WORD fl)
+{
+   if (lock_sectors != 0 && (fl & 0x0200u)) enable();   /* IF was set on entry */
+}
+
+/* Sectors per dispatch round trip: the lock window size, or the protocol
+ * maximum when the lock is off. */
+static UINT wire_chunk_max(void)
+{
+   if (lock_sectors == 0 || lock_sectors > SD_MAX_SECTORS) return (UINT)SD_MAX_SECTORS;
+   return (UINT)lock_sectors;
 }
 
 /* One Init/Error byte-handshake cycle, host->device, direction already Write.
@@ -251,8 +324,6 @@ static int raw_recv_bulk(BYTE DOSFAR *buf, UINT count)
 
 #define SD_STATUS_OK     0x00u
 #define SD_STATUS_ERROR  0x01u
-
-#define SD_MAX_SECTORS  64u
 
 static int g_is_v2 = 0;
 static int g_block_addressed = 0;
@@ -430,6 +501,38 @@ static BYTE DOSFAR *advance_far_ptr(BYTE DOSFAR *p, WORD add_bytes)
  * Section 4: diskio.h public interface.
  * =================================================================== */
 
+/* ---------------------------------------------------------------------
+ * Disney Sound Source FIFO depth (DISPATCH_CMD_DSS, see DSS.md)
+ *
+ * The trinket plays a Sound Source for programs that write the parallel port
+ * directly. It presents the real unit's 16-byte FIFO by default; a deeper one
+ * lets such a program's timer interrupt, on the occasions it gets to run
+ * between disk transactions, write further ahead, and the trinket keeps that
+ * audio playing while this driver has the port. The setting lives in the
+ * trinket's RAM, so it is re-sent on every card initialisation (boot, and
+ * after any error that forces a re-init). Best effort: a failure here never
+ * fails the disk.
+ * --------------------------------------------------------------------- */
+#define DISPATCH_CMD_DSS  0x05u
+#define DSS_OP_SET        0x01u
+
+static int dss_send_config(void)
+{
+   WORD fl;
+   int rc;
+
+   fl = wire_lock();
+   host_select_direction(1);
+   rc = raw_send_byte(DISPATCH_CMD_DSS);
+   if (!rc) rc = raw_send_byte(DSS_OP_SET);
+   if (!rc) rc = raw_send_byte((BYTE)(dss_depth & 0xFFu));
+   if (!rc) rc = raw_send_byte((BYTE)(dss_depth >> 8));
+   if (!rc) rc = raw_send_byte((BYTE)(dss_warmup & 0xFFu));
+   if (!rc) rc = raw_send_byte((BYTE)(dss_warmup >> 8));
+   wire_unlock(fl);
+   return rc;
+}
+
 static DSTATUS Stat = STA_NOINIT;
 
 void setportbase(BYTE val)
@@ -456,7 +559,12 @@ DRESULT disk_check_media(BYTE drv)
 {
    if (drv) return RES_NOTRDY;
    if (Stat & STA_NOINIT) return RES_NOTRDY;
-   if (sd2_check_media() != 0) return RES_NOTRDY;
+   {
+      WORD fl = wire_lock();
+      int rc = sd2_check_media();
+      wire_unlock(fl);
+      if (rc != 0) return RES_NOTRDY;
+   }
    return RES_OK;
 }
 
@@ -483,6 +591,14 @@ DSTATUS disk_initialize(BYTE drv)
       is_v2 ? "SDv2" : "SDv1/MMC",
       block_addressed ? "block" : "byte");
 
+   if (dss_depth != 0) {
+      if (dss_send_config() == 0)
+         cdprintf("TRINKET: Sound Source FIFO depth %d, warm-up %d ms\n",
+            (int)dss_depth, (int)dss_warmup);
+      else
+         cdprintf("TRINKET: could not set the Sound Source FIFO depth\n");
+   }
+
    Stat = 0;
    return Stat;
 }
@@ -494,9 +610,12 @@ DRESULT disk_read(BYTE drv, BYTE DOSFAR *buff, DWORD sector, UINT count)
    if (dr != RES_OK) return dr;
 
    while (count > 0) {
-      UINT chunk = (count > SD_MAX_SECTORS) ? (UINT)SD_MAX_SECTORS : count;
+      UINT chunk = (count > wire_chunk_max()) ? wire_chunk_max() : count;
       UINT i;
-      if (sd2_read_sectors(sector, chunk, p) != 0) return RES_ERROR;
+      WORD fl = wire_lock();
+      int rc = sd2_read_sectors(sector, chunk, p);
+      wire_unlock(fl);
+      if (rc != 0) return RES_ERROR;
       sector += chunk;
       for (i = 0; i < chunk; i++) {
          p = advance_far_ptr(p, 512);
@@ -513,9 +632,12 @@ DRESULT disk_write(BYTE drv, const BYTE DOSFAR *buff, DWORD sector, UINT count)
    if (dr != RES_OK) return dr;
 
    while (count > 0) {
-      UINT chunk = (count > SD_MAX_SECTORS) ? (UINT)SD_MAX_SECTORS : count;
+      UINT chunk = (count > wire_chunk_max()) ? wire_chunk_max() : count;
       UINT i;
-      if (sd2_write_sectors(sector, chunk, p) != 0) return RES_ERROR;
+      WORD fl = wire_lock();
+      int rc = sd2_write_sectors(sector, chunk, p);
+      wire_unlock(fl);
+      if (rc != 0) return RES_ERROR;
       sector += chunk;
       for (i = 0; i < chunk; i++) {
          p = (const BYTE DOSFAR *) advance_far_ptr((BYTE DOSFAR *) p, 512);
