@@ -109,6 +109,14 @@ class machine yet.
    card. If you instead see `SD: adapter or card not found`, go to
    [Troubleshooting](#troubleshooting).
 
+## Staging media from the sd card directly
+
+You can copy TRINKET.SYS to a floppy directly if you prepare a DOS disk
+that contains a Basic interpreter.  Please refer to `./alternate_bootstrap`
+for details.  Through a short 100 line basic program entered by hand,
+you can copy the driver directly through a disk basic and use that to boot up
+the mounted SD card!
+
 ## Using it
 
 ### Storage
