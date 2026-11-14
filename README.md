@@ -1,5 +1,9 @@
 # Trinket SD
 
+<p align="center">
+  <img src="./Photos/Lawrence.png" alt="Two things at the same time." width="300">
+</p>
+
 SD-card storage and sound for DOS-era PCs, through an ordinary parallel port.
 
 The trinket is a small board built around a Raspberry Pi Pico (RP2040). It
@@ -15,27 +19,49 @@ machine two things at once:
   nothing is installed on the PC for this), and it has a **PCM5102 I2S DAC**
   path for raw PCM playback.
 
-Why bother: projects like `sdpp` bit-bang an SD card straight off the
-parallel-port pins, which depends on the card, the module's level shifter and
-the port's wiring all being cooperative. Here the port only ever talks to a
-fixed, level-shifted interface and the RP2040 does the SD work. It is not
-fast (see [Performance](#performance)), but it is predictable.
+Why bother? Projects like `sdpp` bit-bang an SD card directly from the
+parallel-port pins, relying on the card, the module's level shifter, and the
+port wiring to cooperate. Here, the port talks only to a fixed, level-shifted
+interface, while the RP2040 handles the SD card. This approach is predictable,
+faster than bit-banging the card, and compatible with more cards. It also
+reduces the risk of damaging a card due to non-standard current levels on the
+parallel port.
+
+You can also add features to the Trinket, such as support for different sound
+hardware. Last but not least, you can have sound, at the same time! 
+That's likely the best part. Beyond that, what more could you ask for?
+
+
+
+## Photos
+
+| Trinket SD enclosure and internal module | Close-up of the top assembly |
+|---|---|
+| ![Trinket SD enclosure and internal module](./Photos/side%20by%20side.jpg) | ![Close-up of the top assembly](./Photos/asembled%20internal%20PCB%20top.jpg) |
+
+| PCB render with Raspberry Pi Pico | PCB render with SD module and DAC |
+|---|---|
+| ![Trinket SD PCB render with Raspberry Pi Pico](./Photos/Screenshot_20261113_220552.png) | ![Trinket SD PCB render with SD module and DAC](./Photos/Screenshot_20261113_220242.png) |
+
+| Bottom plate | Top plate |
+|---|---|
+| ![Trinket SD bottom plate](./Photos/bottom%20plate.jpg) | ![Trinket SD top plate](./Photos/top%20plate.jpg) |
 
 ## Read this first
 
 > **The SD card is fixed media. Never insert, remove or swap the card while
 > the trinket is powered.**
-> The SD socket is wired straight to an always-on 3.3 V rail, there is no
-> card-detect wiring, and the firmware has no graceful-unmount path. A card
-> pulled out (or pushed in) mid-operation can be corrupted, most likely by
-> interrupting a write at the card's most vulnerable moment. Power down,
-> change the card, power up.
+> The SD socket is wired straight to an always-on 3.3 V rail; there is no
+> card-detect wiring, and the firmware has no graceful-unmount path. The
+> card's data can be corrupted if it is pulled out (or pushed in)
+> mid-operation, most likely by interrupting a write at the card's most
+> vulnerable moment. Power down, change the card, then power up.
 
 ## Status
 
-Everything below was tested on one bench rig: a VIA Eden thin client with a
-real parallel port, running FreeDOS. Nothing has been run on a real 8088/XT
-class machine yet.
+Most testing was done on one bench rig: a VIA Eden thin client with a real
+parallel port, running FreeDOS. A real 4.77 MHz XT-class machine has also
+been tested.
 
 | Area | State |
 |---|---|
@@ -44,17 +70,18 @@ class machine yet.
 | Disney Sound Source emulation (`DSSTEST`, Wolf3D digitized sound) | Confirmed on hardware; mild dropouts during disk loads (see [Known limitations](#known-limitations)) |
 | Interrupt guard, `/l=` (`DSSSTRES` clean with the guard on, fails with `/l=0` as designed) | Confirmed on hardware |
 | PCM playback through the DAC (`DACTEST play`) | Confirmed at 8 kHz mono 8-bit. 44.1 kHz 16-bit stereo underruns (too much data for the port) |
-| Deeper Sound Source FIFO (`/f=`, `/w=`, `DSSCFG`) | Implemented and unit-tested on a host. **Not yet confirmed on hardware** |
-| Real 4.77 MHz XT-class machine | **Not tested** |
+| Deeper Sound Source FIFO (`/f=`, `/w=`, `DSSCFG`) | Implemented and unit-tested on a host. |
+| Real 4.77 MHz XT-class machine | **Tested** |
 | Tandy-style Sound Source (strobe value `0Eh`) | Not supported |
 | FAT32 cards | Not supported. Use FAT16 |
 
 ## What you need
 
 - **A trinket board** with firmware flashed (step 2 below), a DB-25 parallel
-  cable to the PC, and a way to power the Pico.
-  > **TODO (maintainer):** state how the production board is powered (USB on
-  > the Pico?) and which cable it expects, before release.
+  cable to the PC, and a way to power the Pico. Typically, power is supplied
+  through the board's USB connector (Micro-USB on the Raspberry Pi Pico; USB-C
+  on some clones).
+
 - **A microSD/SD card, 2 GB or smaller recommended, formatted FAT16** with
   512-byte sectors and an MBR partition table. The driver handles SDv1/MMC
   and SDv2/SDHC cards; testing was done with a 2 GB FAT16 card.
@@ -66,7 +93,7 @@ class machine yet.
 
 ## Quick start
 
-1. **Get the files.** Either take a release, or build (`./build.sh`) and use
+1. **Get the files.** Either download a release or build (`./build.sh`) and use
    what lands in `dist/`:
 
    | File | Goes to |
@@ -77,7 +104,10 @@ class machine yet.
 
 2. **Flash the firmware.** Hold the Pico's BOOTSEL button while connecting its
    USB port to a modern computer. It shows up as a drive named `RPI-RP2`.
-   Copy `trinket_sd.uf2` onto it. The Pico reboots by itself.
+   Copy `trinket_sd.uf2` onto it. The Pico reboots by itself. **Note:** If the
+   front and back plates are installed, you can press the button through the
+   decorative vent holes with closed, right-angle tweezers or another blunt
+   tool while plugging in the USB cable.
 
 3. **Prepare the card.** On a modern machine, format it FAT16 with an MBR
    (a single primary partition is the simple case). Copy over whatever you
@@ -109,13 +139,13 @@ class machine yet.
    card. If you instead see `SD: adapter or card not found`, go to
    [Troubleshooting](#troubleshooting).
 
-## Staging media from the sd card directly
+## Staging media from the SD card directly
 
 You can copy TRINKET.SYS to a floppy directly if you prepare a DOS disk
-that contains a Basic interpreter.  Please refer to `./alternate_bootstrap`
-for details.  Through a short 100 line basic program entered by hand,
-you can copy the driver directly through a disk basic and use that to boot up
-the mounted SD card!
+that contains a BASIC interpreter. Please refer to `./alternate_bootstrap`
+for details. A short, 100-line BASIC program that you enter by hand lets you
+copy the driver using the disk's BASIC interpreter, then boot from the mounted
+SD card.
 
 ## Using it
 
@@ -133,11 +163,11 @@ The card is a normal DOS drive. Anything DOS can do to a FAT16 volume works:
 
 #### Performance
 
-On the bench rig a 512-byte sector takes about 17 ms over the port, so
-roughly 30 KB/s sustained. A slower PC will be slower. Reported by feel,
-Wolfenstein 3D from the card ran no slower than from a parallel-port Zip
-drive. The limit is the port's byte-at-a-time handshake, not the SD card.
-Reading a byte takes about twice the handshakes of writing one.
+On the bench rig, a 512-byte sector takes about 17 ms over the port, or
+roughly 30 KB/s sustained. A slower PC will be slower. In informal testing,
+Wolfenstein 3D ran from the card no slower than it did from a parallel-port
+Zip drive. The limit is the port's byte-at-a-time handshake, not the SD card.
+Reading a byte takes about twice as many handshakes as writing one.
 
 ### Sound: Disney Sound Source
 
@@ -154,13 +184,7 @@ writes (`04h` / `0Ch`), emulates the unit's 16-byte FIFO and its fixed 7 kHz
 drain rate, answers the game's "FIFO full" poll, and plays the samples
 through the DAC. Nothing resident is needed on the PC for this.
 
-Confirmed with stock Wolfenstein 3D. Known quirks:
-
-- A game that detects the unit by writing more than 16 bytes expects the
-  "full" flag. The trinket raises it at 15 bytes on purpose (one byte early,
-  so a late-polling game cannot overrun the FIFO).
-- Sound Source audio is fixed at 7 kHz, 8-bit unsigned mono. Files for
-  `DSSTEST play` must match that or they play as noise.
+Confirmed with stock Wolfenstein 3D.
 
 ### Sound: PCM through the DAC
 
@@ -266,11 +290,11 @@ Work up from the bottom. Stop at the first step that fails.
 | A game's clock runs slow during long disk reads | Timer interrupts are held off while the driver owns the port. This is expected. `DSSSTRES` shows how many ticks are lost and resyncs the DOS clock from the RTC |
 
 Firmware diagnostics: the Pico exposes a USB serial console. Open it in any
-terminal program. Pressing **ESC** prints a hardware, SD, DAC and Sound
-Source diagnostics report, toggles verbose logging on or off, resets every
-subsystem to idle and plays a short test beep, so do not press it during a
-test run. The console is only serviced between commands: after a game's
-Sound Source session, it answers once the next access to the card happens.
+terminal program. Pressing **ESC** prints a diagnostic report covering the
+hardware, SD card, DAC, and Sound Source; toggles verbose logging on or off;
+resets every subsystem to idle; and plays a short test beep. Do not press it
+during a test run. The console is serviced only between commands: after a
+game's Sound Source session, it responds when the card is next accessed.
 The Pico's on-board LED shows dispatch activity.
 
 ## Known limitations
@@ -279,15 +303,14 @@ The Pico's on-board LED shows dispatch activity.
 - **SD card is fixed media** (see the warning at the top).
 - **Speed is bounded by the port.** Multi-block SD commands (`CMD18`/`CMD25`)
   and a burst-transfer redesign of the wire protocol are not implemented.
-  Either is the only thing that would move that ceiling further. Neither has
-  been started.
+  Either would raise that ceiling; neither has been started.
 - **Brief dropouts** can happen in a Sound Source game while it loads from
-  the card. Heard on hardware in Wolfenstein 3D's demo, mild. The deeper
-  FIFO (`/f=`) is aimed at this but is unconfirmed.
+  the card. Mild dropouts were heard during Wolfenstein 3D's demo on
+  hardware. The deeper FIFO (`/f=`) is intended to help, but is unconfirmed.
 - **Sound Source detection** by games that probe at an arbitrary moment (not
   at power-up) may fail at a deep FIFO depth. Set `DSSCFG default` if so.
-- **Not tested on a real XT.** The Sound Source path is designed to work on
-  an 8088 (no port trapping), but timing there is unmeasured.
+- The Sound Source path is designed to work on an 8088 (no port trapping), but
+  its timing on an XT has not yet been measured.
 
 ## Hardware
 
@@ -346,6 +369,14 @@ and is preserved by `make clean`. Packaging needs `7z` and `zip`.
 | `DSS.md` | Disney Sound Source emulation reference |
 | `TOOLCHAIN.md` | Build environment reference and compiler hazards |
 | `docs/history/` | Development notes, superseded plans and test logs. Kept for the record, **not** a current reference. Start with its README |
+
+## Sponsor
+
+PCBWay sponsored the fabrication of the Trinket SD PCBs. Thanks to PCBWay for
+supporting this project. [Visit PCBWay](https://www.pcbway.com/) for your PCB
+fabrication needs.
+
+[![PCBWay logo](./Photos/small_pcbway.png)](https://www.pcbway.com/)
 
 ## Credits and license
 
